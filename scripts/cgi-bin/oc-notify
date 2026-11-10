@@ -47,6 +47,8 @@ F_ENABLED=""
 F_TOKEN=""
 F_CHAT=""
 F_BASE=""
+F_AUTH=""
+F_RESOLVE=""
 F_MODE=""
 F_PORT=""
 F_EVENTS=""
@@ -73,6 +75,8 @@ if [ -n "$BODY" ]; then
             bot_token)     F_TOKEN="$_v" ;;
             chat_id)       F_CHAT="$_v" ;;
             api_base)      F_BASE="$_v" ;;
+            proxy_auth)    F_AUTH="$_v" ;;
+            api_resolve)   F_RESOLVE="$_v" ;;
             api_mode)      F_MODE="$_v" ;;
             proxy_port)    F_PORT="$_v" ;;
             notify_events) F_EVENTS="$_v" ;;
@@ -130,6 +134,8 @@ if [ "$AUTH" = "1" ] && [ -n "$F_ACTION" ]; then
             [ -n "$F_TOKEN" ]  && sh "$NOTIFY" set bot_token "$F_TOKEN"          >/dev/null 2>&1
             [ -n "$F_CHAT" ]   && sh "$NOTIFY" set chat_id "$F_CHAT"             >/dev/null 2>&1
             [ -n "$F_BASE" ]   && sh "$NOTIFY" set api_base "$F_BASE"            >/dev/null 2>&1
+            [ -n "$F_AUTH" ]   && sh "$NOTIFY" set proxy_auth "$F_AUTH"          >/dev/null 2>&1
+            [ -n "$F_RESOLVE" ]&& sh "$NOTIFY" set api_resolve "$F_RESOLVE"       >/dev/null 2>&1
             [ -n "$F_MODE" ]   && sh "$NOTIFY" set api_mode "$F_MODE"            >/dev/null 2>&1
             [ -n "$F_PORT" ]   && sh "$NOTIFY" set proxy_port "$F_PORT"          >/dev/null 2>&1
             [ -n "$F_EVENTS" ] && sh "$NOTIFY" set notify_events "$F_EVENTS"     >/dev/null 2>&1
@@ -155,10 +161,13 @@ fi
 # ---------------------------------------------------------------------------
 E_TOKEN=$(cfg bot_token)
 case "$E_TOKEN" in '') TOKEN_HINT="未设置" ;; *) TOKEN_HINT="已设置（$(printf '%s' "$E_TOKEN" | cut -c1-8)…）" ;; esac
+E_AUTH=$(cfg proxy_auth)
+case "$E_AUTH" in '') AUTH_HINT="未设置" ;; *) AUTH_HINT="已设置（$(printf '%s' "$E_AUTH" | cut -c1-6)…）" ;; esac
 
 E_ENABLED=$(cfg enabled);           [ -z "$E_ENABLED" ] && E_ENABLED=0
 E_CHAT=$(cfg chat_id)
 E_BASE=$(cfg api_base);             [ -z "$E_BASE" ] && E_BASE="https://api.telegram.org"
+E_RESOLVE=$(cfg api_resolve)
 E_MODE=$(cfg api_mode);             [ -z "$E_MODE" ] && E_MODE=direct
 E_PORT=$(cfg proxy_port);           [ -z "$E_PORT" ] && E_PORT=7893
 E_EVENTS=$(cfg notify_events);      [ -z "$E_EVENTS" ] && E_EVENTS="ready,start_fail,switch_off,net_down,captive,net_up,offline,core_down,update_fail"
@@ -241,6 +250,17 @@ else
 <input type="text" name="api_base" value="$(html_esc "$E_BASE")" placeholder="https://api.telegram.org">
 <div class="hint">填墙后直连可达的反代地址即可。脚本按官方规则在后面拼 <code>/bot&lt;TOKEN&gt;/sendMessage</code>，
 所以这里只填到域名（可带路径前缀，不要带 /bot）。默认 https://api.telegram.org。</div>
+
+<label>反代鉴权头 X-Proxy-Auth <span class="hint" style="display:inline;font-weight:400">（$AUTH_HINT，留空表示不修改）</span></label>
+<input type="password" name="proxy_auth" placeholder="反代要求的密钥">
+<div class="hint">有值时会给每个请求加上 <code>-H "X-Proxy-Auth: ..."</code>。值不能含空格。要清空请在 SSH 里执行
+<code>uci set openclash-notify.main.proxy_auth='' ; uci commit openclash-notify</code>。</div>
+
+<label>DNS 兜底 IP（api_resolve）</label>
+<input type="text" name="api_resolve" value="$(html_esc "$E_RESOLVE")" placeholder="留空 = 用系统 DNS">
+<div class="hint">上游 DNS 把域名错误地解析成 NXDOMAIN 时，填反代的 IP；脚本会用
+<code>curl --resolve 域名:443:IP</code> 绕开本地解析，TLS SNI 仍用原域名。留空表示不修改；清空用
+<code>uci set openclash-notify.main.api_resolve='' ; uci commit openclash-notify</code>。</div>
 
 <label>Chat ID</label>
 <input type="text" name="chat_id" value="$(html_esc "$E_CHAT")" placeholder="-1001234567890 或 123456789">

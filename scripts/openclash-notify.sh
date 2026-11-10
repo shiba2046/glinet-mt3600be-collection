@@ -4,7 +4,7 @@
 #
 #  OpenClash 状态事件 -> Telegram Bot 推送（GL.iNet GL-MT3600BE / OpenWrt 21.02）
 #  Repo   : https://github.com/shiba2046/glinet-mt3600be-collection
-#  Version: 1.0.0
+#  Version: 1.1.0
 #
 #  设计要点（为什么不是一个 curl 就完事）：
 #    1. 不阻塞拨杆：拨杆脚本处在固件的 flock 串行区里，一次 HTTPS 超时 12s
@@ -15,6 +15,8 @@
 #    3. API 地址可配：api_base 默认 https://api.telegram.org，也可以填自建
 #       反代（墙后直连可达的那种）。默认 api_mode=direct，只请求这一个地址，
 #       不做任何自动切换、不走 clash 代理，避免反代流量被二次转发。
+#       反代需要鉴权时用 proxy_auth 加 X-Proxy-Auth 头；上游 DNS 有 NXDOMAIN
+#       负缓存导致域名解析不了时，用 api_resolve 填 IP，走 curl --resolve 绕开。
 #       仍保留 proxy / auto 两个可选模式，但默认不用。
 #    4. 不刷屏：同一事件 25 秒内只记一次；watcher 是边沿触发而非每次轮询。
 #
@@ -34,7 +36,7 @@
 #    clear                     清空队列
 # ============================================================================
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 CONF="/etc/config/openclash-notify"
 SPOOL="${OCN_SPOOL:-/etc/openclash-notify/spool}"
 LOG="${OCN_LOG:-/tmp/openclash-notify.log}"
@@ -91,6 +93,8 @@ config notify 'main'
 	option bot_token ''
 	option chat_id ''
 	option api_base 'https://api.telegram.org'
+	option proxy_auth ''
+	option api_resolve ''
 	option api_mode 'direct'
 	option proxy_port '7893'
 	option notify_events 'ready,start_fail,switch_off,net_down,captive,net_up,offline,core_down,update_fail'
@@ -163,6 +167,24 @@ $_txt
     _caopt=""
     [ -f "$CA" ] && _caopt="--cacert $CA"
 
+    # 反代鉴权头。$_authopt 以不加引号的方式展开成两个 curl 参数，所以值不能含
+    # 空格；do_set 的字符白名单已挡住空格，直接编辑配置文件时同样请勿含空格。
+    _authopt=""
+    _auth=$(cfg proxy_auth)
+    [ -n "$_auth" ] && _authopt="-H X-Proxy-Auth:$_auth"
+
+    # 上游 DNS 残留 NXDOMAIN 负缓存时，用 --resolve 把主机名直接钉到 IP。
+    # 主机名/端口从 api_base 取，TLS SNI 仍按 URL 主机名发，Cloudflare 可正确路由。
+    _resopt=""
+    _rip=$(cfg api_resolve)
+    if [ -n "$_rip" ]; then
+        _hp=$(printf '%s' "$_base" | sed -e 's|^[A-Za-z][A-Za-z0-9+.-]*://||' -e 's|/.*$||')
+        _port=$(printf '%s' "$_hp" | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
+        _host=$(printf '%s' "$_hp" | sed 's|:[0-9][0-9]*$||')
+        [ -n "$_port" ] || _port=443
+        _resopt="--resolve $_host:$_port:$_rip"
+    fi
+
     for _m in $_modes; do
         _px=""
         if [ "$_m" = "proxy" ]; then
@@ -170,7 +192,7 @@ $_txt
             pidof clash >/dev/null 2>&1 || { log INFO "核心未运行，跳过代理模式"; continue; }
             _px="--proxy http://127.0.0.1:$(cfg_or proxy_port 7893)"
         fi
-        _resp=$(curl -sS --connect-timeout 4 --max-time 12 $_caopt $_px \
+        _resp=$(curl -sS --connect-timeout 4 --max-time 12 $_caopt $_px $_resopt $_authopt \
             -X POST "$_url" \
             --data-urlencode "chat_id=$_chat" \
             --data-urlencode "text=$_text" \
@@ -276,20 +298,22 @@ do_test() {
     return 1
 }
 
-mask_token() {
-    _t=$(cfg bot_token)
+mask_val() {
+    _t=$(cfg "$1")
     case "$_t" in
         '') echo '<未设置>' ;;
-        *)  printf '%s...%s\n' "$(printf '%s' "$_t" | cut -c1-8)" "$(printf '%s' "$_t" | tail -c 5)" ;;
+        *)  printf '%s...%s\n' "$(printf '%s' "$_t" | cut -c1-6)" "$(printf '%s' "$_t" | tail -c 5)" ;;
     esac
 }
 
 do_config() {
     echo "配置文件 : $CONF"
     echo "enabled      : $(cfg_or enabled 0)"
-    echo "bot_token    : $(mask_token)"
+    echo "bot_token    : $(mask_val bot_token)"
     echo "chat_id      : $(cfg_or chat_id '<未设置>')"
     echo "api_base     : $(cfg_or api_base "$API_DEFAULT")"
+    echo "proxy_auth   : $(mask_val proxy_auth)  (X-Proxy-Auth 头)"
+    echo "api_resolve  : $(cfg_or api_resolve '<未启用>')  (DNS 兜底 IP，留空则用系统 DNS)"
     echo "api_mode     : $(cfg_or api_mode direct)  (direct=只请求 api_base / proxy=走 clash / auto=两者都试)"
     echo "proxy_port   : $(cfg_or proxy_port 7893)（仅 proxy/auto 时用到）"
     echo "web_pin      : $(if [ -n "$(cfg web_pin)" ]; then echo 已设置; else echo '<未设置>'; fi)"
@@ -301,13 +325,14 @@ do_set() {
     _k="${1:-}"; shift 2>/dev/null
     _v="$*"
     case "$_k" in
-        enabled|bot_token|chat_id|api_base|api_mode|proxy_port|notify_events|web_pin) ;;
-        *) echo "未知配置项：$_k" >&2; echo "可用：enabled bot_token chat_id api_base api_mode proxy_port notify_events web_pin" >&2; return 1 ;;
+        enabled|bot_token|chat_id|api_base|proxy_auth|api_resolve|api_mode|proxy_port|notify_events|web_pin) ;;
+        *) echo "未知配置项：$_k" >&2; echo "可用：enabled bot_token chat_id api_base proxy_auth api_resolve api_mode proxy_port notify_events web_pin" >&2; return 1 ;;
     esac
     # 严格白名单：这些值最终会进 uci / curl 命令行，不能让 shell 元字符逃逸。
-    # 允许字母数字和 : _ , . = @ / + - 与空格，bot token / chat_id / PIN 都够用。
+    # 允许字母数字和 : _ , . = @ / + -（不含空格：proxy_auth 要以单参数形式
+    # 传给 curl，含空格会被拆成两个参数）。
     if printf '%s' "$_v" | grep -q '[^A-Za-z0-9_:,.=@/+-]'; then
-        echo "值含不允许的字符（仅允许字母数字及 : _ , . = @ / + - 空格）" >&2
+        echo "值含不允许的字符（仅允许字母数字及 : _ , . = @ / + -，不能含空格）" >&2
         return 1
     fi
     [ -f "$CONF" ] || do_init >/dev/null

@@ -32,7 +32,8 @@
   并附上 OpenClash 自己的日志尾部。
 - **分层自动更新**：geo/规则交给 mihomo 核心自己更，订阅走自建 cron，核心二进制只手动更。
 - **Telegram 状态推送**：开启成功 / 启动失败 / 关闭 / 外网中断 / 恢复 / 认证页 / 更新失败都会发消息；
-  异步队列 + 断网补发，不阻塞拨杆。支持填墙后可达的 API 反代地址。
+  异步队列 + 断网补发，不阻塞拨杆。支持填墙后可达的 API 反代地址、自定义鉴权头
+  `X-Proxy-Auth`，以及本地 DNS 解析不了时的 `--resolve` 兜底。
 - **配置页**：`http://192.168.8.1:8080/cgi-bin/oc-notify`，用 uhttpd 现成的 CGI，无额外常驻服务。
 - **可回滚**：安装时把原有文件备份到 `/root/openclash-switch-backup/<时间戳>/`。
 
@@ -87,7 +88,9 @@ tail -f /tmp/openclash-switch.log
 
 **Telegram 通知（可选）**：浏览器打开 `http://192.168.8.1:8080/cgi-bin/oc-notify`，
 设一个访问 PIN，填 Bot Token / Chat ID / Telegram API 地址（墙后可达的反代），
-启用后点「发送测试消息」。详见 [docs/11-telegram-notify.md](docs/11-telegram-notify.md)。
+启用后点「发送测试消息」。反代要鉴权就填 `X-Proxy-Auth`；域名在公共 DNS 能解析、
+但路由器报 `Could not resolve host` 时填 `DNS 兜底 IP`。
+详见 [docs/11-telegram-notify.md](docs/11-telegram-notify.md)。
 
 命令行等价写法：
 
@@ -95,6 +98,8 @@ tail -f /tmp/openclash-switch.log
 sh /etc/openclash-notify.sh set bot_token '123456789:AAF...'
 sh /etc/openclash-notify.sh set chat_id '-1001234567890'
 sh /etc/openclash-notify.sh set api_base 'https://tg.example.com'
+sh /etc/openclash-notify.sh set proxy_auth  '反代密钥'          # 可选：X-Proxy-Auth
+sh /etc/openclash-notify.sh set api_resolve '1.2.3.4'            # 可选：本地 DNS 兜底
 sh /etc/openclash-notify.sh enable && sh /etc/openclash-notify.sh test
 ```
 

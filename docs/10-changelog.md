@@ -1,5 +1,28 @@
 # 10 · 版本历史与踩坑记录
 
+## v1.1.0（通知模块；拨杆脚本仍为 v0.4.0）
+
+**新增：反代鉴权头 + DNS 负缓存兜底**
+
+- `proxy_auth`：非空时给每次请求加 `-H "X-Proxy-Auth: <值>"`，头名可在 `send_one()`
+  的 `_authopt` 一行改；`config` / `status` 打码显示
+- `api_resolve`：填反代 IP 时用 `curl --resolve <host>:<port>:<ip>` 绕开本地 DNS，
+  TLS SNI 仍用原主机名；端口从 `api_base` 提取，默认 443
+- 配置页新增两个输入框；`do_init` 默认配置、`do_set` 白名单、`do_config` 同步
+- `mask_token` 泛化为 `mask_val <key>`，同时给 `proxy_auth` 打码
+- 修正 `do_set` 注释/报错里「允许空格」的错误描述：正则实际不允许，且 `proxy_auth`
+  含空格会被拆成两个 curl 参数
+
+**排查结论（DNS）**
+
+反代域名在 1.1.1.1 / 8.8.8.8 / 223.5.5.5 / 208.67.222.222 均可解析，权威 NS/SOA 正常；
+只有路由器上游 `192.168.1.1` 返回 NXDOMAIN → 记录添加前留下的**负缓存**或 DNS 过滤，
+不是「域名没生效」。改全局 DNS 会影响桥接 WiFi 的 captive portal，故只用 `--resolve`
+作用于通知请求。
+
+**实测**：`getMe` 返回 `ok:true`；`test` 发送成功；`emit ready` 0s 返回、1s 后送达、
+队列 1 → 0。真实凭证只写设备 `/etc/config/openclash-notify`（权限 600），未入库。
+
 ## v0.4.0
 
 **新增：Telegram 状态通知**
