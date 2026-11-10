@@ -1,5 +1,40 @@
 # 10 · 版本历史与踩坑记录
 
+## v0.4.0
+
+**新增：Telegram 状态通知**
+
+- `scripts/openclash-notify.sh`：异步队列 + 独立发送进程 + 断网补发 + 25s 事件防抖；
+  队列落 `/etc/openclash-notify/spool/`（flash，重启不丢），上限 50 条
+- `scripts/cgi-bin/oc-notify`：配置页，直接挂 uhttpd 现成的 `cgi_prefix=/cgi-bin`，
+  不新增服务、不重启 uhttpd；带 `web_pin` 访问保护与字符白名单
+- 拨杆脚本接入 8 类状态事件（开启成功 / 启动失败 / 关闭 / 外网中断 / 上游断开 /
+  强制门户 / 网络恢复 / 每日更新结果）；watcher 按**状态变化**触发，不按轮询刷屏
+- `api_base` 可填墙后直连可达的 Telegram API 反代；默认 `api_mode=direct`，
+  不切换、不走 clash 代理，避免反代流量被二次转发
+- `install.sh`：`--no-notify` 开关，`/etc/sysupgrade.conf` 追加通知相关 4 个路径
+- `deploy.sh`：`--setup-key` 一键装免密公钥；自动带专用 `-i`，命令行关掉
+  `ForwardX11` / `ForwardAgent`（修正 `Host *` 带来的 xauth 噪音）
+
+**修复**
+
+- `do_install_cron` 的去重写法 `grep -v ... > tmp && mv` 在「所有行都被删掉」时
+  `grep` 返回 1 → `mv` 被短路 → 每跑一次 install-cron 多追加一行。
+  设备上实测已积累到每天 04:00 执行 **3 次**，修复后为 1 次。见踩坑 #17。
+- `status` 增加 Telegram 通知状态与配置页地址。
+- CGI 表单解析：`tr '&' '\n'` 输出末尾没有换行，`while read` 会跳过最后一行，
+  导致表单**最后一个字段永远保存不了**（实测 `notify_events` 写不进去）。
+  改为 `printf '%s\n' "$BODY" | tr '&' '\n'`，并给 `while` 加 `|| [ -n "$_k" ]` 兜底。见踩坑 #20。
+
+**实测（固件 4.9.0）**
+
+| 项目 | 结果 |
+|---|---|
+| 配置页 `GET :8080/cgi-bin/oc-notify` | HTTP 200 / 5442 字节 |
+| 假 token 同步测试 | Telegram 返回 `401 Unauthorized`（证明 HTTPS/CA/URL 拼接全通） |
+| `emit` 返回耗时 | 0s（不阻塞拨杆） |
+| 发送失败 / 恢复补发 | 队列保留 1 条 → 指向成功接口后 1 → 0 |
+
 ## v0.3.0
 
 **新增**
@@ -128,6 +163,42 @@ clash 核心和 watcher 继承后一直持有 → 后续每次拨动都永久排
 
 GL 自己的读 `/tmp/gl_crontabs`（开机重建，不能手写），系统 cron 读 `/etc/crontabs/root`。
 任务要写后者。
+
+### 17. `grep -v > tmp && mv` 去重会静默失效
+
+清理 crontab 里的旧任务行时，如果文件里**全部行**都带那个标记，`grep -v` 输出空并返回 **1**，
+`&& mv` 被短路，旧文件原封不动；随后又追加一行新任务 —— 每跑一次安装就多一条。
+设备上出现过每天 04:00 执行 3 次。正确写法是把 `grep` 和 `mv` 分成两条语句：
+
+```sh
+grep -vF "$CRON_TAG" "$CRON_FILE" > "$CRON_FILE.tmp" 2>/dev/null
+mv -f "$CRON_FILE.tmp" "$CRON_FILE"
+```
+
+### 18. dropbear 的 authorized_keys 不在 `~/.ssh/`
+
+GL 固件跑 dropbear 而不是 OpenSSH，公钥要放 `/etc/dropbear/authorized_keys`（本机实测该文件
+已存在）。`ssh-copy-id` 默认写 `~/.ssh/authorized_keys`，经常不生效。
+另外本机 Git Bash 的 `~/.ssh/` 里**没有任何默认命名的私钥**（`id_rsa`/`id_ed25519` 全缺），
+密钥都带后缀命名且没有 ssh-agent，所以裸 `ssh root@192.168.8.1` 只能走密码。
+`deploy.sh --setup-key` 生成专用密钥并自动带 `-i` 解决。
+
+### 19. 配置页在 8080，不在 80
+
+80/443 是 nginx（GL 管理界面），uhttpd/LuCI 在 8080/8443 且已配 `cgi_prefix=/cgi-bin`。
+往 `/www/cgi-bin/` 放一个 755 的 ash 脚本即可当 CGI 跑，无需改配置或重启服务。
+但 uhttpd 以 root 运行，CGI 里绝不能 `eval` 或拼接 shell 命令。
+
+### 20. `tr '&' '\n'` + `while read` 会吞掉最后一个表单字段
+
+`tr` 的输出末尾不带换行，而 `while read` 对「最后一行没有换行符」的情况返回非零，
+循环体不会执行 —— 表现为表单最后一个输入框怎么都保存不了，且无任何报错。
+补一个换行，或写成 `while read ... || [ -n "$var" ]`：
+
+```sh
+printf '%s\n' "$BODY" | tr '&' '\n' > "$TMP.pairs"
+while IFS='=' read -r _k _v || [ -n "$_k" ]; do ... done < "$TMP.pairs"
+```
 
 ---
 

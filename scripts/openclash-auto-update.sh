@@ -55,6 +55,13 @@ log_rotate() {
     fi
 }
 
+# 状态通知（可选）。异步：cron 里的更新流程不能被 Telegram 超时拖住。
+notify() {
+    [ -x /etc/openclash-notify.sh ] || return 0
+    [ "$(uci -q get openclash-notify.main.enabled 2>/dev/null)" = "1" ] || return 0
+    ( exec sh /etc/openclash-notify.sh emit "$@" >/dev/null 2>&1 ) &
+}
+
 mem_avail() {
     awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo 2>/dev/null
 }
@@ -228,8 +235,10 @@ do_run() {
 
     if update_sub; then
         write_state "ok" "mode=$( [ -n "$(clash_pid)" ] && echo restart || echo norestart )"
+        notify update_ok "每日依赖更新完成 | 订阅与 geo 数据已刷新 | 可用内存 $(mem_avail)MB"
     else
         write_state "failed" "see $LOG_FILE"
+        notify update_fail "每日依赖更新失败 | 详见 $LOG_FILE"
     fi
     log INFO "===== 结束 ====="
 }
@@ -243,9 +252,10 @@ do_install_cron() {
         : > "$CRON_FILE"
     fi
     # 清掉旧的本脚本任务行（保留 OpenClash 自己的 #openclash-cron-task 行不动）
-    if grep -qF "$CRON_TAG" "$CRON_FILE" 2>/dev/null; then
-        grep -vF "$CRON_TAG" "$CRON_FILE" > "$CRON_FILE.tmp" 2>/dev/null && mv -f "$CRON_FILE.tmp" "$CRON_FILE"
-    fi
+    # 关键：grep -v 若把所有行都删光会返回 1，绝不能用 && 串 mv —— 否则清理
+    # 静默失效，每跑一次 install-cron 就多追加一行（曾出现每天 04:00 执行 3 次）。
+    grep -vF "$CRON_TAG" "$CRON_FILE" > "$CRON_FILE.tmp" 2>/dev/null
+    mv -f "$CRON_FILE.tmp" "$CRON_FILE"
     [ -s "$CRON_FILE" ] && [ -n "$(tail -c 1 "$CRON_FILE" 2>/dev/null)" ] && echo >> "$CRON_FILE"
     printf '0 4 * * * /etc/openclash-auto-update.sh run >/dev/null 2>&1 %s\n' "$CRON_TAG" >> "$CRON_FILE"
     crontab "$CRON_FILE" 2>/dev/null

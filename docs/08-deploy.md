@@ -4,11 +4,15 @@
 
 1. GL 后台 → 系统 → SSH 已启用（默认 root 密码就是后台密码）。
 2. 电脑与路由器同网段（`192.168.8.x`）。
-3. 建议配置免密，否则部署过程要输 1–2 次密码：
+3. 建议配置免密，只需输一次密码：
 
 ```sh
-ssh-copy-id -i ~/.ssh/id_ed25519.pub root@192.168.8.1
+ROUTER_HOST=192.168.8.1 ./deploy.sh --setup-key
 ```
+
+它会生成 `~/.ssh/id_ed25519_glinet`，把公钥追加到 **`/etc/dropbear/authorized_keys`**
+（GL 固件跑 dropbear，`ssh-copy-id` 默认写的 `~/.ssh/authorized_keys` 不生效），
+之后 `deploy.sh` 自动带 `-i`，不再提示密码。详见踩坑 #18。
 
 ## 部署
 
@@ -31,9 +35,11 @@ ROUTER_HOST=192.168.8.1 ./deploy.sh               # 正式部署
 | `--tune-openclash` | 应用小内存参数（`small_flash_memory=0`、关 smart 等） |
 | `--trim-services` | 停用 `netifyd` / `gl_dpi`，nginx worker 2→1 |
 | `--no-cron` | 不安装每日 04:00 订阅更新任务 |
+| `--no-notify` | 不安装 Telegram 通知模块与配置页 |
 | `--dry-run` | 只打印计划 |
 
-`./deploy.sh --status` 只看状态，不做任何改动。
+`./deploy.sh --status` 只看状态（开关 / 自动更新 / 通知三块），不做任何改动；
+`./deploy.sh --setup-key` 只配置 SSH 免密，不安装任何东西。
 
 ## install.sh 做了什么
 
@@ -48,11 +54,15 @@ ROUTER_HOST=192.168.8.1 ./deploy.sh               # 正式部署
 6. **开机时机**：`/etc/init.d/openclash disable`（默认），改由 `S99gl_switch_button_check` 决定。
 7. **`/etc/rc.local` 钩子**：在 `exit 0` 前插入 `( sleep 25; ... sync ) &`，已有则跳过，
    改完做 `sh -n` 校验，失败会提示从备份恢复。
-8. **升级保留**：把 `/etc/gl-switch.d/`、`/etc/rc.local`、`/etc/openclash-auto-update.sh`
-   写进 `/etc/sysupgrade.conf`。
-9. **自动更新**：装 `/etc/openclash-auto-update.sh`，调 `install-cron`。
-10. **可选优化**（`--tune-openclash` / `--trim-services`，见 [05](05-memory-and-core.md)）。
-11. **收尾**：打印备份目录、可用内存和下一步提示。
+8. **升级保留**：把 `/etc/gl-switch.d/`、`/etc/rc.local`、`/etc/openclash-auto-update.sh`、
+   `/etc/openclash-notify.sh`、`/www/cgi-bin/oc-notify`、`/etc/config/openclash-notify`、
+   `/etc/openclash-notify/` 写进 `/etc/sysupgrade.conf`（逐条判重，不重复追加）。
+9. **自动更新**：装 `/etc/openclash-auto-update.sh`，调 `install-cron`（会先把旧任务行清空再加，
+   保证只有一条）。
+10. **Telegram 通知**（`--no-notify` 跳过）：装 `/etc/openclash-notify.sh`、配置页 CGI，
+    再 `init` 生成默认配置 —— **已有 bot_token 不会被覆盖**。
+11. **可选优化**（`--tune-openclash` / `--trim-services`，见 [05](05-memory-and-core.md)）。
+12. **收尾**：打印备份目录、可用内存、配置页地址和下一步提示。
 
 所有被覆盖的文件都先拷到 `/root/openclash-switch-backup/<YYYYMMDD-HHMMSS>/`。
 
@@ -74,11 +84,17 @@ tail -8 /tmp/openclash-switch.log       # 模块处理了事件
 curl -s -m 10 -x http://127.0.0.1:7890 -o /dev/null \
      -w 'code=%{http_code} time=%{time_total}s\n' https://www.gstatic.com/generate_204
 
-# 5) cron 是否装上
-crontab -l | grep openclash-auto-update
+# 5) cron 是否装上（只能有 1 行，出现多行见踩坑 #17）
+crontab -l | grep -c openclash-auto-update
+
+# 6) 通知配置页与模块
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.8.1:8080/cgi-bin/oc-notify
+sh /etc/openclash-notify.sh status
+sh /etc/openclash-notify.sh test        # 填好 token 之后
 ```
 
-期望：ON 约 20 秒核心稳定、`code=204`；OFF 约 10 秒进程消失、灯全灭。
+期望：ON 约 20 秒核心稳定、`code=204`；OFF 约 10 秒进程消失、灯全灭；
+配置页返回 `200`。通知配置详见 [11](11-telegram-notify.md)。
 
 ## 升级（装新版本）
 
@@ -107,7 +123,9 @@ cp -f /rom/etc/rc.button/switch  /etc/rc.button/switch
 [ -f /var/run/openclash-switch.watch.pid ] && kill $(cat /var/run/openclash-switch.watch.pid) 2>/dev/null
 rm -f  /etc/gl-switch.d/openclash.sh
 rm -f  /etc/openclash-auto-update.sh
-rm -rf /var/lock/openclash-switch.*
+rm -f  /etc/openclash-notify.sh /www/cgi-bin/oc-notify
+rm -f  /etc/config/openclash-notify          # 不想保留 bot token 时
+rm -rf /etc/openclash-notify /var/lock/openclash-switch.*
 
 # 2) 解除绑定（改成你想要的固件功能，例如 wifi）
 uci set switch-button.@main[0].func='wifi'
@@ -120,7 +138,7 @@ sed -i '/openclash-switch-hook/,+1d' /etc/rc.local
 sed -i '/openclash-auto-update/d' /etc/crontabs/root && crontab /etc/crontabs/root
 
 # 5) 移除升级保留项
-sed -i '\#/etc/gl-switch.d/#d; \#/etc/openclash-auto-update.sh#d' /etc/sysupgrade.conf
+sed -i '\#/etc/gl-switch.d/#d; \#/etc/openclash-auto-update.sh#d; \#/etc/openclash-notify#d; \#/www/cgi-bin/oc-notify#d' /etc/sysupgrade.conf
 
 # 6) 恢复 OpenClash 开机自启（如果想恢复出厂行为）
 /etc/init.d/openclash enable

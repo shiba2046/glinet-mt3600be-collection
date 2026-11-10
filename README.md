@@ -31,6 +31,9 @@
 - **失败自诊断**：启动失败会自己判断是不是被 OOM Killer 杀掉（只认本次启动之后的 `dmesg`），
   并附上 OpenClash 自己的日志尾部。
 - **分层自动更新**：geo/规则交给 mihomo 核心自己更，订阅走自建 cron，核心二进制只手动更。
+- **Telegram 状态推送**：开启成功 / 启动失败 / 关闭 / 外网中断 / 恢复 / 认证页 / 更新失败都会发消息；
+  异步队列 + 断网补发，不阻塞拨杆。支持填墙后可达的 API 反代地址。
+- **配置页**：`http://192.168.8.1:8080/cgi-bin/oc-notify`，用 uhttpd 现成的 CGI，无额外常驻服务。
 - **可回滚**：安装时把原有文件备份到 `/root/openclash-switch-backup/<时间戳>/`。
 
 ---
@@ -44,7 +47,10 @@
 ├── scripts/
 │   ├── gl-switch.d/
 │   │   └── openclash.sh       # 拨动开关模块（部署到 /etc/gl-switch.d/openclash.sh）
-│   └── openclash-auto-update.sh  # 依赖文件自动更新（部署到 /etc/openclash-auto-update.sh）
+│   ├── openclash-auto-update.sh  # 依赖文件自动更新（部署到 /etc/openclash-auto-update.sh）
+│   ├── openclash-notify.sh    # Telegram 状态推送（部署到 /etc/openclash-notify.sh）
+│   └── cgi-bin/
+│       └── oc-notify          # 配置页 CGI（部署到 /www/cgi-bin/oc-notify）
 ├── tools/
 │   ├── rssh.py                # paramiko 远程执行/上传（没有 sftp 时用得上）
 │   └── rc.local.example       # rc.local 钩子示例
@@ -59,10 +65,13 @@
 git clone git@github.com:shiba2046/glinet-mt3600be-collection.git
 cd glinet-mt3600be-collection
 
+# 0) 首次：配置 SSH 免密（只需输一次密码）
+ROUTER_HOST=192.168.8.1 ./deploy.sh --setup-key
+
 # 1) 先看设备现状（不安装）
 ROUTER_HOST=192.168.8.1 ./deploy.sh --status
 
-# 2) 安装：开关模块 + 自动更新 + 每日 04:00 cron
+# 2) 安装：开关模块 + 自动更新 + 每日 04:00 cron + Telegram 通知
 ROUTER_HOST=192.168.8.1 ./deploy.sh
 
 # 3) 可选：小内存优化 + 停用 DPI 等后台服务
@@ -76,8 +85,24 @@ sh /etc/gl-switch.d/openclash.sh status
 tail -f /tmp/openclash-switch.log
 ```
 
-没有免密时先 `ssh-copy-id root@192.168.8.1`，否则每次部署要输密码。
-不想用 ssh 也可以把仓库推到设备后直接跑 `sh install.sh`，参数见 `sh install.sh -h`。
+**Telegram 通知（可选）**：浏览器打开 `http://192.168.8.1:8080/cgi-bin/oc-notify`，
+设一个访问 PIN，填 Bot Token / Chat ID / Telegram API 地址（墙后可达的反代），
+启用后点「发送测试消息」。详见 [docs/11-telegram-notify.md](docs/11-telegram-notify.md)。
+
+命令行等价写法：
+
+```sh
+sh /etc/openclash-notify.sh set bot_token '123456789:AAF...'
+sh /etc/openclash-notify.sh set chat_id '-1001234567890'
+sh /etc/openclash-notify.sh set api_base 'https://tg.example.com'
+sh /etc/openclash-notify.sh enable && sh /etc/openclash-notify.sh test
+```
+
+> `--setup-key` 会生成 `~/.ssh/id_ed25519_glinet` 并把公钥写到
+> `/etc/dropbear/authorized_keys`（GL 固件跑 dropbear，`ssh-copy-id` 默认写的
+> `~/.ssh/authorized_keys` 不生效）。装好之后 `deploy.sh` 自动带 `-i`，不再提示密码。
+> 不想用 ssh 也可以把仓库推到设备后直接跑 `sh install.sh`；
+> 不想装通知模块可加 `--no-notify`，完整参数见 `sh install.sh -h`。
 
 ---
 
@@ -96,7 +121,9 @@ tail -f /tmp/openclash-switch.log
    ├─ probe()  三个 generate_204：204=在线 / 有 HTTP 但非 204=认证页 / 全失败=离线
    ├─ uci set openclash.config.enable=1|0     ← 意图，watcher 与启动流程都看它
    ├─ start_clash / stop_clash                ← 调 /etc/init.d/openclash
-   └─ watch_start / watch_stop                ← 20s 轮询的后台守护
+   ├─ watch_start / watch_stop                ← 20s 轮询的后台守护
+   └─ notify <event>                         ← 写本地队列即返回；独立进程发 Telegram
+        └─ /etc/openclash-notify.sh flush     ← 断网留队列，恢复后按序补发
 ```
 
 ---
@@ -143,6 +170,7 @@ tail -f /tmp/openclash-switch.log
 | [docs/08-deploy.md](docs/08-deploy.md) | 部署、升级保留、回滚与卸载 |
 | [docs/09-troubleshooting.md](docs/09-troubleshooting.md) | 症状 → 原因 → 处理 |
 | [docs/10-changelog.md](docs/10-changelog.md) | 版本历史与踩坑记录 |
+| [docs/11-telegram-notify.md](docs/11-telegram-notify.md) | Telegram 状态推送、反代地址、配置页与排查 |
 
 ## 许可
 

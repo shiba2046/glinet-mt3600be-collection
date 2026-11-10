@@ -14,13 +14,17 @@
 #    --tune-openclash   顺带应用小内存优化（small_flash_memory=0 等，见 docs/05）
 #    --trim-services    顺带停用 netifyd / gl_dpi（省约 20MB，会失去客户端流量统计）
 #    --no-cron          不安装每日 04:00 订阅更新任务
+#    --no-notify        不安装 Telegram 通知模块与配置页（默认安装）
 #    --dry-run          只打印将要做的事，不落盘
 # ============================================================================
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 TARGET_DIR="/etc/gl-switch.d"
 SWITCH_DST="$TARGET_DIR/openclash.sh"
 AUTOUP_DST="/etc/openclash-auto-update.sh"
+NOTIFY_DST="/etc/openclash-notify.sh"
+CGI_DST="/www/cgi-bin/oc-notify"
+NOTIFY_CONF="/etc/config/openclash-notify"
 BACKUP_ROOT="/root/openclash-switch-backup"
 TS=$(date '+%Y%m%d-%H%M%S')
 BACKUP_DIR="$BACKUP_ROOT/$TS"
@@ -28,6 +32,8 @@ BACKUP_DIR="$BACKUP_ROOT/$TS"
 HERE=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
 SRC_SWITCH="$HERE/scripts/gl-switch.d/openclash.sh"
 SRC_AUTOUP="$HERE/scripts/openclash-auto-update.sh"
+SRC_NOTIFY="$HERE/scripts/openclash-notify.sh"
+SRC_CGI="$HERE/scripts/cgi-bin/oc-notify"
 
 DO_AUTOUP=1
 DO_RC_HOOK=1
@@ -35,6 +41,7 @@ DISABLE_AUTOSTART=1
 DO_TUNE=0
 DO_TRIM=0
 DO_CRON=1
+DO_NOTIFY=1
 DRY=0
 
 RC_HOOK_TAG="# openclash-switch-hook"
@@ -71,6 +78,7 @@ for _a in "$@"; do
         --tune-openclash) DO_TUNE=1 ;;
         --trim-services)  DO_TRIM=1 ;;
         --no-cron)        DO_CRON=0 ;;
+        --no-notify)      DO_NOTIFY=0 ;;
         --dry-run)        DRY=1 ;;
         -h|--help)        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)                die "未知参数：$_a（-h 看帮助）" ;;
@@ -210,25 +218,24 @@ fi
 # 5. 固件升级保留清单
 # ---------------------------------------------------------------------------
 step "写入 /etc/sysupgrade.conf（升级保留）"
-for _p in "$TARGET_DIR/" /etc/rc.local; do
-    if grep -qxF "$_p" /etc/sysupgrade.conf 2>/dev/null; then
-        say "  已存在：$_p"
+add_sysupgrade() {
+    if grep -qxF "$1" /etc/sysupgrade.conf 2>/dev/null; then
+        say "  已存在：$1"
     elif [ "$DRY" = "1" ]; then
-        say "  [dry-run] 追加 $_p"
+        say "  [dry-run] 追加 $1"
     else
-        echo "$_p" >> /etc/sysupgrade.conf
-        say "  已追加：$_p"
+        echo "$1" >> /etc/sysupgrade.conf
+        say "  已追加：$1"
     fi
-done
-if [ "$DO_AUTOUP" = "1" ]; then
-    if grep -qxF "$AUTOUP_DST" /etc/sysupgrade.conf 2>/dev/null; then
-        say "  已存在：$AUTOUP_DST"
-    elif [ "$DRY" = "1" ]; then
-        say "  [dry-run] 追加 $AUTOUP_DST"
-    else
-        echo "$AUTOUP_DST" >> /etc/sysupgrade.conf
-        say "  已追加：$AUTOUP_DST"
-    fi
+}
+add_sysupgrade "$TARGET_DIR/"
+add_sysupgrade /etc/rc.local
+[ "$DO_AUTOUP" = "1" ] && add_sysupgrade "$AUTOUP_DST"
+if [ "$DO_NOTIFY" = "1" ]; then
+    add_sysupgrade "$NOTIFY_DST"
+    add_sysupgrade "$CGI_DST"
+    add_sysupgrade "$NOTIFY_CONF"
+    add_sysupgrade /etc/openclash-notify/
 fi
 
 # ---------------------------------------------------------------------------
@@ -248,6 +255,49 @@ if [ "$DO_AUTOUP" = "1" ]; then
     fi
     if [ "$DO_CRON" = "1" ]; then
         run sh "$AUTOUP_DST" install-cron
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6b. Telegram 状态通知（默认安装，--no-notify 可跳过）
+#     配置文件里已有 bot_token 时绝不会覆盖，升级安装是安全的
+# ---------------------------------------------------------------------------
+if [ "$DO_NOTIFY" = "1" ]; then
+    step "安装 Telegram 状态通知 -> $NOTIFY_DST"
+    [ -f "$SRC_NOTIFY" ] || die "包不完整：缺少 $SRC_NOTIFY"
+    [ -f "$SRC_CGI" ]    || die "包不完整：缺少 $SRC_CGI"
+    backup "$NOTIFY_DST"
+    if [ "$DRY" != "1" ]; then
+        cp -f "$SRC_NOTIFY" "$NOTIFY_DST.tmp" && chmod 755 "$NOTIFY_DST.tmp" && mv -f "$NOTIFY_DST.tmp" "$NOTIFY_DST" \
+            || die "写入 $NOTIFY_DST 失败"
+        sh -n "$NOTIFY_DST" || die "语法检查失败：$NOTIFY_DST"
+        say "  已安装，语法检查通过"
+    else
+        say "  [dry-run] 复制 $SRC_NOTIFY -> $NOTIFY_DST"
+    fi
+
+    step "安装配置页 CGI -> $CGI_DST"
+    if [ -d /www/cgi-bin ]; then
+        backup "$CGI_DST"
+        if [ "$DRY" != "1" ]; then
+            cp -f "$SRC_CGI" "$CGI_DST.tmp" && chmod 755 "$CGI_DST.tmp" && mv -f "$CGI_DST.tmp" "$CGI_DST" \
+                || die "写入 $CGI_DST 失败"
+            sh -n "$CGI_DST" || die "语法检查失败：$CGI_DST"
+            say "  已安装，uhttpd 已有 cgi_prefix=/cgi-bin，无需重启服务"
+        else
+            say "  [dry-run] 复制 $SRC_CGI -> $CGI_DST"
+        fi
+    else
+        warn "找不到 /www/cgi-bin，跳过配置页（命令行配置仍可用）"
+    fi
+
+    step "初始化通知配置（不覆盖已有 token）"
+    if [ "$DRY" != "1" ]; then
+        sh "$NOTIFY_DST" init
+        mkdir -p /etc/openclash-notify/spool
+        say "  配置页：http://$(uci -q get network.lan.ipaddr 2>/dev/null || echo 192.168.8.1):8080/cgi-bin/oc-notify"
+    else
+        say "  [dry-run] 执行 $NOTIFY_DST init"
     fi
 fi
 
@@ -311,4 +361,11 @@ say "  下一步："
 say "    sh $SWITCH_DST status      # 看状态"
 say "    拨动开关                    # 实际验证（或 OCSW_IGNORE_POS=1 sh $SWITCH_DST on）"
 say "    tail -f /tmp/openclash-switch.log"
+if [ "$DO_NOTIFY" = "1" ]; then
+    say ""
+    say "  Telegram 通知（可选）："
+    say "    浏览器打开 http://<路由器IP>:8080/cgi-bin/oc-notify 填 bot token / chat_id"
+    say "    sh $NOTIFY_DST test         # 发一条测试消息"
+    say "    sh $NOTIFY_DST status       # 看配置与待发队列"
+fi
 exit 0

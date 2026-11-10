@@ -5,3 +5,4 @@
 *.py      text eol=lf
 *.md      text eol=lf
 *.example text eol=lf
+scripts/cgi-bin/oc-notify text eol=lf

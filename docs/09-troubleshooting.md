@@ -272,3 +272,49 @@ tail -20 /tmp/openclash-auto-update.log
 
 `del_cron()` 里有 `sed -i '/#openclash-cron-task/d'`，OpenClash 一停任务就整行删除。
 这是官方行为，所以本仓库改用不带该标记的自建 cron 行。
+
+### E5. 每天 04:00 更新执行了好几次
+
+```sh
+crontab -l | grep -c openclash-auto-update     # 应该是 1
+```
+
+大于 1 说明是旧版 `install-cron` 留下的重复行：它用 `grep -v ... > tmp && mv` 去重，
+当所有行都被删掉时 `grep` 返回 1、`mv` 被短路，于是每装一次多追加一行（见踩坑 #17）。
+v0.4.0 已修复，重新跑一次部署即可收敛到 1 行：
+
+```sh
+ROUTER_HOST=192.168.8.1 ./deploy.sh
+```
+
+## F. Telegram 通知
+
+### F1. 测试消息收不到
+
+按 401 / 400 / 空响应区分是 token、chat_id 还是网络问题：
+
+```sh
+sh /etc/openclash-notify.sh test
+tail -n 20 /tmp/openclash-notify.log
+sh /etc/openclash-notify.sh status
+```
+
+`401 Unauthorized` = 链路完全正常、token 不对；`chat not found` = chat_id 不对或 bot 不在群里；
+日志里 `direct 发送失败：` 后面为空 = 连不上 `api_base`（反代地址 / DNS / 证书）。
+
+### F2. 队列一直不减少
+
+确认 `enabled=1`、token 与 chat_id 都填了，然后手动补发：
+
+```sh
+sh /etc/openclash-notify.sh flush
+```
+
+断网期间发不出去是设计行为，网络恢复后 watcher 会自动补发并标注延迟。
+
+### F3. 配置页打不开
+
+确认访问的是 **8080**（`http://192.168.8.1:8080/cgi-bin/oc-notify`），
+80 端口是 nginx 的 GL 管理界面。再查 `ls -l /www/cgi-bin/oc-notify` 是否为 755。
+
+完整清单见 [11-telegram-notify.md](11-telegram-notify.md)。

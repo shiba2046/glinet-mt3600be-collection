@@ -5,7 +5,7 @@
 #  物理拨动开关 -> OpenClash 模块（GL.iNet GL-MT3600BE / 固件 v4.x）
 #
 #  Repo   : https://github.com/shiba2046/glinet-mt3600be-collection
-#  Version: 0.3.0
+#  Version: 0.4.0
 #
 #  调用链（全部由固件负责，本文件只是被调用的一方）：
 #     物理拨杆
@@ -29,7 +29,7 @@
 #     sh /etc/gl-switch.d/openclash.sh watch      # 只起后台守护
 # ============================================================================
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 MAIN_LOG="${OCSW_LOG:-/tmp/openclash-switch.log}"
 OC_START_LOG="/tmp/openclash_start.log"
 OC_LOG="/tmp/openclash.log"
@@ -73,6 +73,27 @@ log_rotate() {
     [ "$_sz" -gt "$LOG_MAX" ] 2>/dev/null || return 0
     mv -f "$MAIN_LOG" "$MAIN_LOG.1" 2>/dev/null
     log INFO "日志超过 ${LOG_MAX}B，已轮转到 $MAIN_LOG.1"
+}
+
+# ---------------------------------------------------------------------------
+# Telegram 状态通知（可选，见 /etc/openclash-notify.sh）
+#   未安装 / 未启用时立即返回，连子进程都不产生。
+#   启用后也必须完全异步：拨杆动作处在固件 flock 串行区，一次 HTTPS 超时
+#   就会让开关看起来卡住。通知脚本只往本地队列写一行，再 fork 独立进程发送；
+#   断网时消息留在 flash，网络恢复后按序补发。
+# ---------------------------------------------------------------------------
+NOTIFY="/etc/openclash-notify.sh"
+
+notify() {
+    [ -x "$NOTIFY" ] || return 0
+    [ "$(uci -q get openclash-notify.main.enabled 2>/dev/null)" = "1" ] || return 0
+    ( exec sh "$NOTIFY" emit "$@" >/dev/null 2>&1 ) &
+}
+
+notify_flush() {
+    [ -x "$NOTIFY" ] || return 0
+    [ "$(uci -q get openclash-notify.main.enabled 2>/dev/null)" = "1" ] || return 0
+    ( exec sh "$NOTIFY" flush >/dev/null 2>&1 ) &
 }
 
 # ---------------------------------------------------------------------------
@@ -252,7 +273,9 @@ fail_diag() {
 # ---------------------------------------------------------------------------
 # 启动 / 停止
 # ---------------------------------------------------------------------------
+# 参数 1 可选：启动成功后要推送的事件名（watcher 恢复时传 net_up，默认 ready）
 start_clash() {
+    _ok_event="${1:-ready}"
     _t0=$(date +%s)
     _pid=$(clash_pid)
     if [ -n "$_pid" ]; then
@@ -305,6 +328,7 @@ start_clash() {
                     log WARN "可用内存仅 ${_av}MB，偏低（可停用 netifyd/DPI 或精简规则）"
                 fi
                 led_on
+                notify "$_ok_event" "已就绪 | 核心 pid=$_p | 稳定 ${_stable}s | 总耗时 ${_el}s | 可用内存 ${_av}MB"
                 return 0
             fi
         else
@@ -321,6 +345,7 @@ start_clash() {
 
     log ERROR "等待 ${START_TIMEOUT}s 仍未得到稳定运行的核心"
     fail_diag
+    notify start_fail "启动失败 | 等待 ${START_TIMEOUT}s 未得到稳定核心 | 可用内存 $(mem_avail)MB | 详见 /tmp/openclash-switch.log"
     return 1
 }
 
@@ -400,15 +425,20 @@ watch_loop() {
         case "$_st" in
             0)
                 _fail=0
+                _prev="$_last"
                 if [ -z "$(clash_pid)" ]; then
-                    _last=""
+                    _ev="ready"
+                    [ -n "$_prev" ] && [ "$_prev" != "online" ] && _ev="net_up"
                     log INFO "watcher：外网可用（$PROBE_DETAIL），启动 OpenClash"
-                    start_clash
+                    start_clash "$_ev"
                 else
-                    if [ "$_last" != "online" ]; then
+                    if [ "$_prev" != "online" ]; then
                         log INFO "watcher：外网可用（$PROBE_DETAIL），clash 运行中 pid=$(clash_pid) $(upstream_info)"
+                        [ -n "$_prev" ] && notify net_up "网络已恢复 | 核心持续运行 pid=$(clash_pid) | $PROBE_DETAIL"
                     fi
                 fi
+                # 状态刚回到在线：补发断网期间攒在 flash 队列里的消息
+                [ "$_prev" != "online" ] && notify_flush
                 _last="online"
                 ;;
             1)
@@ -416,8 +446,12 @@ watch_loop() {
                 if [ -n "$(clash_pid)" ]; then
                     log WARN "watcher：需要网页认证（$PROBE_DETAIL），先暂停 OpenClash 以便打开认证页"
                     stop_clash
+                    if [ "$_last" != "portal" ]; then
+                        notify captive "检测到网页认证 | $PROBE_DETAIL | 已暂停核心，请在浏览器打开任意 http 页面完成登录"
+                    fi
                 elif [ "$_last" != "portal" ]; then
                     log WARN "watcher：仍在等待网页认证（$PROBE_DETAIL）。浏览器打开任意 http 页面完成登录后会自动恢复"
+                    notify captive "等待网页认证 | $PROBE_DETAIL | 完成登录后自动恢复 OpenClash"
                 fi
                 _last="portal"
                 ;;
@@ -430,6 +464,7 @@ watch_loop() {
                     if [ "$_fail" -eq 3 ]; then
                         log WARN "watcher：连续 3 次外网不通，暂停 OpenClash（可能是认证过期或节点失效）"
                         [ -n "$(clash_pid)" ] && stop_clash
+                        notify net_down "外网中断 | 连续 3 次探测不通（$PROBE_DETAIL）| 已暂停核心，恢复后自动重启"
                         _last="degraded"
                     fi
                 else
@@ -437,8 +472,10 @@ watch_loop() {
                     if [ -n "$(clash_pid)" ]; then
                         log WARN "watcher：上游网络断开（无默认路由或网关不可达），暂停 OpenClash"
                         stop_clash
+                        [ "$_last" != "offline" ] && notify offline "上游网络断开 | 无默认路由或网关不可达 | 已暂停核心"
                     elif [ "$_last" != "offline" ]; then
                         log WARN "watcher：上游网络不通，等待网络恢复后自动启动"
+                        notify offline "上游网络不通 | 等待网络恢复后自动启动"
                     fi
                     _last="offline"
                 fi
@@ -450,6 +487,8 @@ watch_loop() {
         if [ "$_beat" -ge 15 ]; then
             _beat=0
             log INFO "watcher 心跳：状态=${_last:-未知} 连续失败=${_fail} clash_pid=$(clash_pid) 可用内存=$(mem_avail)MB"
+            # 兜底：万一恢复时的 emit 被防抖挡掉，5 分钟也会再试一次补发
+            notify_flush
         fi
 
         sleep "$WATCH_INTERVAL"
@@ -507,19 +546,22 @@ do_on() {
                 # 每次都重启核心既慢又费内存；已在运行就只补守护。
                 log INFO "外网可用（$PROBE_DETAIL），clash 已在运行 pid=$(clash_pid)，跳过重启，仅同步指示灯"
                 led_on
+                notify ready "拨杆 ON | 核心已在运行 pid=$(clash_pid) | $PROBE_DETAIL"
             else
                 log INFO "外网可用（$PROBE_DETAIL），立即启动"
-                start_clash
+                start_clash ready
             fi
             ;;
         1)
             log WARN "外网需要网页认证（$PROBE_DETAIL）：暂不启动核心，先让认证页能打开"
             log WARN "请在浏览器访问任意 http 网站完成登录，之后会自动启动 OpenClash"
             [ -n "$(clash_pid)" ] && stop_clash
+            notify captive "拨杆 ON 但需网页认证 | $PROBE_DETAIL | 暂不启动核心，完成登录后自动恢复"
             ;;
         2)
             log WARN "外网不通（$PROBE_DETAIL，$(upstream_info)）：暂不启动核心，等网络恢复"
             [ -n "$(clash_pid)" ] && stop_clash
+            notify offline "拨杆 ON 但外网不通 | $PROBE_DETAIL $(upstream_info) | 暂不启动核心，等恢复"
             ;;
     esac
 
@@ -542,6 +584,8 @@ do_off() {
 
     watch_stop
     stop_clash
+    # 核心停了之后 Telegram 未必还通；发不出去就留在队列，下次 ON 补发
+    notify switch_off "拨杆 OFF | OpenClash 已停止，代理已暂停"
     return 0
 }
 
@@ -590,6 +634,14 @@ do_status() {
         2) echo "外网探测      : 不通（$PROBE_DETAIL）" ;;
     esac
     echo "日志          : $MAIN_LOG"
+    if [ -x "$NOTIFY" ]; then
+        _ne=$(uci -q get openclash-notify.main.enabled 2>/dev/null)
+        _nq=$(ls -1 /etc/openclash-notify/spool/*.msg 2>/dev/null | wc -l)
+        echo "Telegram 通知 : $([ "$_ne" = "1" ] && echo 已启用 || echo 未启用)，待发 ${_nq} 条"
+        echo "  配置页      : http://$(uci -q get network.lan.ipaddr 2>/dev/null || echo 192.168.8.1):8080/cgi-bin/oc-notify"
+    else
+        echo "Telegram 通知 : 未安装"
+    fi
     echo "============================================"
 }
 

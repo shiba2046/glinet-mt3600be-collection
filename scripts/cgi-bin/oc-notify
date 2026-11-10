@@ -1,0 +1,300 @@
+#!/bin/sh
+# ============================================================================
+#  /www/cgi-bin/oc-notify
+#
+#  OpenClash Telegram 通知的极简配置页（uhttpd CGI，无需额外常驻服务）
+#  访问：http://192.168.8.1:8080/cgi-bin/oc-notify
+#
+#  为什么放在 8080：GL.iNet 固件把 80/443 给了 nginx（GL 管理界面），
+#  uhttpd（LuCI）在 8080/8443，且 /etc/config/uhttpd 已配 cgi_prefix=/cgi-bin。
+#  目录下任意可执行文件都会被当 CGI 执行，不用改 uhttpd 配置、不用重启服务。
+#
+#  安全：uhttpd 以 root 运行，所以这里绝不 eval / 拼接 shell 命令。
+#  所有写操作只经由 notify.sh set 的固定白名单键；表单值做 URL 解码后，
+#  再由 notify.sh 做一次字符白名单校验。页面用 web_pin 挡住同网段其他人。
+# ============================================================================
+
+NOTIFY="/etc/openclash-notify.sh"
+CONF="/etc/config/openclash-notify"
+LOG="/tmp/openclash-notify.log"
+TMP="/tmp/oc-notify-cgi.$$"
+
+trap 'rm -f "$TMP" "$TMP.pairs" "$TMP.html"' EXIT
+
+cfg() { uci -q get "openclash-notify.main.$1" 2>/dev/null; }
+
+html_esc() {
+    printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'
+}
+
+urldecode() {
+    printf '%b' "$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"
+}
+
+# ---------------------------------------------------------------------------
+# 读取请求
+# ---------------------------------------------------------------------------
+BODY=""
+LEN="${CONTENT_LENGTH:-0}"
+case "$LEN" in ''|*[!0-9]*) LEN=0 ;; esac
+if [ "$LEN" -gt 0 ] 2>/dev/null && [ "$LEN" -lt 8192 ] 2>/dev/null; then
+    BODY=$(dd bs="$LEN" count=1 2>/dev/null)
+fi
+
+Q_PIN=""
+F_ACTION=""
+F_ENABLED=""
+F_TOKEN=""
+F_CHAT=""
+F_BASE=""
+F_MODE=""
+F_PORT=""
+F_EVENTS=""
+F_PIN=""
+F_NEWPIN=""
+
+# GET 参数（只用 pin / msg）
+for _p in $(printf '%s' "${QUERY_STRING:-}" | tr '&' ' '); do
+    case "$_p" in
+        pin=*)  Q_PIN=$(urldecode "${_p#pin=}") ;;
+        msg=*)  Q_MSG=$(urldecode "${_p#msg=}") ;;
+    esac
+done
+
+if [ -n "$BODY" ]; then
+    # 必须补一个换行：tr 的输出末尾没有 \n，while read 会丢掉最后一行，
+    # 也就是表单最后一个字段永远不会被保存。
+    printf '%s\n' "$BODY" | tr '&' '\n' > "$TMP.pairs"
+    while IFS='=' read -r _k _v || [ -n "$_k" ]; do
+        _v=$(urldecode "$_v")
+        case "$_k" in
+            action)        F_ACTION="$_v" ;;
+            enabled)       F_ENABLED="$_v" ;;
+            bot_token)     F_TOKEN="$_v" ;;
+            chat_id)       F_CHAT="$_v" ;;
+            api_base)      F_BASE="$_v" ;;
+            api_mode)      F_MODE="$_v" ;;
+            proxy_port)    F_PORT="$_v" ;;
+            notify_events) F_EVENTS="$_v" ;;
+            pin)           F_PIN="$_v" ;;
+            new_pin)       F_NEWPIN="$_v" ;;
+            msg)           Q_MSG="$_v" ;;
+        esac
+    done < "$TMP.pairs"
+fi
+
+# cookie 里的 pin（避免每次都把 pin 带在地址栏）
+C_PIN=""
+for _c in $(printf '%s' "${HTTP_COOKIE:-}" | tr ';' ' '); do
+    case "$_c" in ocn_pin=*) C_PIN=$(urldecode "${_c#ocn_pin=}") ;; esac
+done
+
+CUR_PIN=$(cfg web_pin)
+[ -z "$CUR_PIN" ] && FIRST_RUN=1 || FIRST_RUN=0
+
+# 判定本次请求是否已通过 PIN
+GIVEN_PIN="$F_PIN"
+[ -z "$GIVEN_PIN" ] && GIVEN_PIN="$Q_PIN"
+[ -z "$GIVEN_PIN" ] && GIVEN_PIN="$C_PIN"
+
+if [ "$FIRST_RUN" = "1" ]; then
+    AUTH=1
+else
+    if [ -n "$GIVEN_PIN" ] && [ "$GIVEN_PIN" = "$CUR_PIN" ]; then AUTH=1; else AUTH=0; fi
+fi
+
+SET_COOKIE=""
+[ "$AUTH" = "1" ] && [ -n "$GIVEN_PIN" ] && SET_COOKIE="$GIVEN_PIN"
+
+# ---------------------------------------------------------------------------
+# 写操作（仅在鉴权通过后）
+# ---------------------------------------------------------------------------
+RESULT=""
+if [ "$AUTH" = "1" ] && [ -n "$F_ACTION" ]; then
+    case "$F_ACTION" in
+        unlock)
+            RESULT="PIN 正确，可以修改配置了。"
+            ;;
+        save)
+            case "$F_ENABLED" in 0|1) ;; *) F_ENABLED=$(cfg enabled) ;; esac
+            if [ "$FIRST_RUN" = "1" ] && [ -n "$F_NEWPIN" ]; then
+                sh "$NOTIFY" set web_pin "$F_NEWPIN" >/dev/null 2>&1
+                CUR_PIN="$F_NEWPIN"
+                GIVEN_PIN="$F_NEWPIN"
+                SET_COOKIE="$F_NEWPIN"
+                FIRST_RUN=0
+                AUTH=1
+            fi
+            sh "$NOTIFY" set enabled "$F_ENABLED" >/dev/null 2>&1
+            # 空值一律视为「不修改」：密码框留空不覆盖 token，也能挡住畸形 POST
+            [ -n "$F_TOKEN" ]  && sh "$NOTIFY" set bot_token "$F_TOKEN"          >/dev/null 2>&1
+            [ -n "$F_CHAT" ]   && sh "$NOTIFY" set chat_id "$F_CHAT"             >/dev/null 2>&1
+            [ -n "$F_BASE" ]   && sh "$NOTIFY" set api_base "$F_BASE"            >/dev/null 2>&1
+            [ -n "$F_MODE" ]   && sh "$NOTIFY" set api_mode "$F_MODE"            >/dev/null 2>&1
+            [ -n "$F_PORT" ]   && sh "$NOTIFY" set proxy_port "$F_PORT"          >/dev/null 2>&1
+            [ -n "$F_EVENTS" ] && sh "$NOTIFY" set notify_events "$F_EVENTS"     >/dev/null 2>&1
+            RESULT="已保存。建议点『发送测试』确认能收到消息。"
+            ;;
+        test)
+            _o=$(sh "$NOTIFY" test 2>&1)
+            RESULT=$(html_esc "$_o")
+            ;;
+        flush)
+            sh "$NOTIFY" flush >/dev/null 2>&1
+            RESULT="已尝试补发队列，剩余 $(ls -1 /etc/openclash-notify/spool/*.msg 2>/dev/null | wc -l) 条。"
+            ;;
+        clear)
+            sh "$NOTIFY" clear >/dev/null 2>&1
+            RESULT="队列已清空。"
+            ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
+# 页面
+# ---------------------------------------------------------------------------
+E_TOKEN=$(cfg bot_token)
+case "$E_TOKEN" in '') TOKEN_HINT="未设置" ;; *) TOKEN_HINT="已设置（$(printf '%s' "$E_TOKEN" | cut -c1-8)…）" ;; esac
+
+E_ENABLED=$(cfg enabled);           [ -z "$E_ENABLED" ] && E_ENABLED=0
+E_CHAT=$(cfg chat_id)
+E_BASE=$(cfg api_base);             [ -z "$E_BASE" ] && E_BASE="https://api.telegram.org"
+E_MODE=$(cfg api_mode);             [ -z "$E_MODE" ] && E_MODE=direct
+E_PORT=$(cfg proxy_port);           [ -z "$E_PORT" ] && E_PORT=7893
+E_EVENTS=$(cfg notify_events);      [ -z "$E_EVENTS" ] && E_EVENTS="ready,start_fail,switch_off,net_down,captive,net_up,offline,core_down,update_fail"
+QUEUE_N=$(ls -1 /etc/openclash-notify/spool/*.msg 2>/dev/null | wc -l)
+CLASH_PID=$(pidof clash 2>/dev/null)
+[ -z "$CLASH_PID" ] && CLASH_STATE="未运行" || CLASH_STATE="运行中 pid=$CLASH_PID"
+
+printf 'Content-Type: text/html; charset=utf-8\r\n'
+printf 'Cache-Control: no-store\r\n'
+[ -n "$SET_COOKIE" ] && printf 'Set-Cookie: ocn_pin=%s; Path=/cgi-bin/; SameSite=Lax\r\n' "$SET_COOKIE"
+printf '\r\n'
+
+cat <<EOF
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenClash · Telegram 通知</title>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:24px;background:#f5f6f8;color:#222;
+ font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif}
+.wrap{max-width:720px;margin:0 auto}h1{font-size:20px;margin:0 0 4px}
+.sub{color:#777;font-size:12px;margin-bottom:18px}
+.card{background:#fff;border:1px solid #e3e6ea;border-radius:10px;padding:18px;margin-bottom:14px}
+label{display:block;margin:12px 0 4px;font-weight:600;font-size:13px}
+input[type=text],input[type=password],select,textarea{width:100%;padding:8px 10px;border:1px solid #ccd2d9;
+ border-radius:6px;font:13px/1.4 monospace;background:#fff}
+textarea{height:64px;resize:vertical}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+button{padding:8px 14px;border:1px solid #ccd2d9;border-radius:6px;background:#fff;cursor:pointer;font-size:13px}
+button.pri{background:#2f6feb;border-color:#2f6feb;color:#fff}
+button:hover{opacity:.85}
+.hint{color:#888;font-size:12px;margin-top:4px}
+.stat{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:#555}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px}
+.on{background:#e6f4ea;color:#1a7f37}.off{background:#f1f3f5;color:#666}
+pre{background:#f7f8fa;border:1px solid #e8ebee;border-radius:6px;padding:10px;
+ white-space:pre-wrap;word-break:break-all;font-size:11px;max-height:220px;overflow:auto}
+.msg{background:#eaf3ff;border:1px solid #c7dcff;color:#164a9c;padding:9px 12px;border-radius:6px;margin-bottom:14px;font-size:13px}
+code{background:#eef0f3;padding:1px 5px;border-radius:3px;font-size:12px}
+</style></head><body><div class="wrap">
+<h1>OpenClash · Telegram 通知</h1>
+<div class="sub">GL-MT3600BE　|　配置页跑在 uhttpd CGI 上，无额外服务</div>
+EOF
+
+if [ -n "$RESULT" ]; then printf '<div class="msg">%s</div>\n' "$RESULT"; fi
+if [ -n "${Q_MSG:-}" ]; then printf '<div class="msg">%s</div>\n' "$(html_esc "$Q_MSG")"; fi
+
+cat <<EOF
+<div class="card">
+<div class="stat">
+ <span>通知：<b class="badge $([ "$E_ENABLED" = "1" ] && echo on || echo off)">$([ "$E_ENABLED" = "1" ] && echo 已启用 || echo 已停用)</b></span>
+ <span>clash：$CLASH_STATE</span>
+ <span>待发队列：$QUEUE_N 条</span>
+ <span>token：$TOKEN_HINT</span>
+</div>
+</div>
+EOF
+
+if [ "$AUTH" != "1" ]; then
+    cat <<EOF
+<div class="card"><h2>需要访问 PIN</h2>
+<form method="post"><input type="hidden" name="action" value="unlock">
+<label>访问 PIN</label><input type="password" name="pin" autofocus>
+<div class="row"><button class="pri" type="submit">解锁</button></div>
+<div class="hint">PIN 存在 /etc/config/openclash-notify 的 web_pin。忘记可在 SSH 里执行
+<code>uci set openclash-notify.main.web_pin=''</code> 重置。</div>
+</form></div>
+EOF
+else
+    cat <<EOF
+<div class="card">
+<form method="post">
+<input type="hidden" name="pin" value="$(html_esc "$GIVEN_PIN")">
+<input type="hidden" name="action" value="save">
+
+<label>Bot Token <span class="hint" style="display:inline;font-weight:400">（$TOKEN_HINT，留空表示不修改）</span></label>
+<input type="password" name="bot_token" placeholder="123456789:AAF...">
+
+<label>Telegram API 地址（api_base）</label>
+<input type="text" name="api_base" value="$(html_esc "$E_BASE")" placeholder="https://api.telegram.org">
+<div class="hint">填墙后直连可达的反代地址即可。脚本按官方规则在后面拼 <code>/bot&lt;TOKEN&gt;/sendMessage</code>，
+所以这里只填到域名（可带路径前缀，不要带 /bot）。默认 https://api.telegram.org。</div>
+
+<label>Chat ID</label>
+<input type="text" name="chat_id" value="$(html_esc "$E_CHAT")" placeholder="-1001234567890 或 123456789">
+<div class="hint">把 bot 拉进群/频道时 chat_id 常为负数；私聊为正数。</div>
+
+<label>启用通知</label>
+<select name="enabled">
+<option value="1" $([ "$E_ENABLED" = "1" ] && echo selected)>启用</option>
+<option value="0" $([ "$E_ENABLED" != "1" ] && echo selected)>停用</option>
+</select>
+
+<label>发送方式</label>
+<select name="api_mode">
+<option value="direct" $([ "$E_MODE" = direct ] && echo selected)>直连 api_base（推荐，不做任何切换）</option>
+<option value="proxy" $([ "$E_MODE" = proxy ] && echo selected)>走 clash 代理</option>
+<option value="auto" $([ "$E_MODE" = auto ] && echo selected)>先直连，失败再试 clash 代理</option>
+</select>
+<div class="hint">用墙后可达的反代时保持 direct：不需要切换，也不会被 clash 二次转发。</div>
+
+<label>Clash 代理端口（mixed-port，仅 proxy/auto 用到）</label>
+<input type="text" name="proxy_port" value="$(html_esc "$E_PORT")">
+
+<label>要推送的事件</label>
+<textarea name="notify_events">$(html_esc "$E_EVENTS")</textarea>
+<div class="hint">逗号分隔。可用：ready, start_fail, switch_off, net_down, captive, net_up, offline, core_down, update_ok, update_fail</div>
+EOF
+    if [ "$FIRST_RUN" = "1" ]; then
+        cat <<EOF
+<label>设置访问 PIN（首次配置，建议 6 位数字）</label>
+<input type="password" name="new_pin" placeholder="留空则本页不设防">
+<div class="hint">同网段任何人都能打开 8080 端口，设 PIN 可避免别人看到 chat_id 或改配置。</div>
+EOF
+    fi
+    cat <<EOF
+<div class="row"><button class="pri" type="submit">保存配置</button></div>
+</form>
+</div>
+
+<div class="card"><h2>维护</h2>
+<div class="row">
+<form method="post" style="display:inline"><input type="hidden" name="pin" value="$(html_esc "$GIVEN_PIN")"><input type="hidden" name="action" value="test"><button type="submit">发送测试消息</button></form>
+<form method="post" style="display:inline"><input type="hidden" name="pin" value="$(html_esc "$GIVEN_PIN")"><input type="hidden" name="action" value="flush"><button type="submit">立即补发队列</button></form>
+<form method="post" style="display:inline"><input type="hidden" name="pin" value="$(html_esc "$GIVEN_PIN")"><input type="hidden" name="action" value="clear"><button type="submit">清空队列</button></form>
+</div>
+<div class="hint">断网期间的消息会留在 flash 队列，网络恢复后自动补发并标注延迟。</div>
+</div>
+EOF
+fi
+
+echo '<div class="card"><h2>最近日志</h2><pre>'
+tail -n 20 "$LOG" 2>/dev/null | html_esc || echo '(暂无)'
+echo '</pre></div>'
+echo '<div class="hint">命令行：<code>sh /etc/openclash-notify.sh status</code>　·　'
+echo '<code>sh /etc/openclash-notify.sh test</code>　·　'
+echo '<code>sh /etc/gl-switch.d/openclash.sh status</code></div>'
+echo '</div></body></html>'
+exit 0
