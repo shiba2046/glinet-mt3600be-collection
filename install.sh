@@ -18,7 +18,7 @@
 #    --dry-run          只打印将要做的事，不落盘
 # ============================================================================
 
-VERSION="0.4.0"
+VERSION="0.5.0"
 TARGET_DIR="/etc/gl-switch.d"
 SWITCH_DST="$TARGET_DIR/openclash.sh"
 AUTOUP_DST="/etc/openclash-auto-update.sh"
@@ -295,6 +295,18 @@ if [ "$DO_NOTIFY" = "1" ]; then
     if [ "$DRY" != "1" ]; then
         sh "$NOTIFY_DST" init
         mkdir -p /etc/openclash-notify/spool
+        # v1.2.0 新增分阶段通知事件：把新事件补进已有白名单（保留用户自己的裁剪），
+        # 否则已存在的配置里没有这些键，emit 会直接把它们过滤掉。
+        _ev_cur=$(uci -q get openclash-notify.main.notify_events)
+        for _ev_new in switch_on_begin switch_off_begin off_fail net_up_begin update_start update_ok; do
+            case ",$_ev_cur," in
+                *",$_ev_new,"*) ;;
+                *) _ev_cur="${_ev_cur},${_ev_new}" ;;
+            esac
+        done
+        uci -q set openclash-notify.main.notify_events="$_ev_cur"
+        uci -q commit openclash-notify
+        say "  已同步事件白名单（补齐分阶段通知）"
         say "  配置页：http://$(uci -q get network.lan.ipaddr 2>/dev/null || echo 192.168.8.1):8080/cgi-bin/oc-notify"
     else
         say "  [dry-run] 执行 $NOTIFY_DST init"

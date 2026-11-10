@@ -1,6 +1,6 @@
 # 11 · Telegram 状态通知与配置页
 
-> 对应 `scripts/openclash-notify.sh` v1.1.0、`scripts/cgi-bin/oc-notify`、`scripts/gl-switch.d/openclash.sh` v0.4.0
+> 对应 `scripts/openclash-notify.sh` v1.2.0、`scripts/cgi-bin/oc-notify`、`scripts/gl-switch.d/openclash.sh` v0.5.0
 
 ## 11.1 要解决什么
 
@@ -69,7 +69,7 @@ config notify 'main'
 	option api_resolve ''
 	option api_mode 'direct'
 	option proxy_port '7893'
-	option notify_events 'ready,start_fail,switch_off,net_down,captive,net_up,offline,update_fail'
+	option notify_events 'switch_on_begin,ready,start_fail,switch_off_begin,switch_off,off_fail,net_down,captive,net_up,net_up_begin,offline,core_down,update_start,update_ok,update_fail'
 	option web_pin '123456'
 ```
 
@@ -141,50 +141,68 @@ uci set openclash-notify.main.api_resolve='' && uci commit openclash-notify
 
 反代换 IP 时这个值也要跟着改，长期挂着需留意。
 
+> 2026-11-10 15:42 复查：本地 DNS 已恢复正常（`dns=0.004s`，不带 `--resolve` 也能
+> `http=200`）。用户决定**继续保留** `api_resolve`：`--resolve` 会跳过一次 DNS 查询
+> （约 4ms，相对总耗时 0.94s 基本无感），真正价值是上游 DNS 再抽 NXDOMAIN 时不必临时改配置。
+> 代价就是上面那条——反代换 IP 要同步更新。
+
 ## 11.5 事件清单
 
-默认启用：`ready,start_fail,switch_off,net_down,captive,net_up,offline,update_fail`
+**v1.2.0 起：拨杆动作分「开始 / 结果」两条推送**，每条正文都是多行 emoji，不再是一行长串。
 
-| 事件 | 触发时机 |
-|---|---|
-| `ready` | 拨到 ON 且核心启动成功（稳定 14s）；或开机 `sync` 时核心已在运行 |
-| `start_fail` | 等满 150s 仍未得到稳定运行的核心 |
-| `switch_off` | 拨到 OFF，核心已停止 |
-| `net_down` | watcher 连续 3 次（约 60s）外网探测失败，但上游链路正常 → 暂停核心 |
-| `offline` | 上游链路断开（无默认路由 / 网关不可达）→ 暂停核心 |
-| `captive` | 检测到强制门户，需要网页认证 |
-| `net_up` | 网络恢复，核心重新拉起或持续运行 |
-| `update_fail` | 每日 04:00 依赖更新失败 |
-| `update_ok` | 每日更新成功（默认**不**启用，想每天收一条心跳可手动加入） |
-| `core_down` | 预留事件，当前版本未接钩子 |
+默认启用（全量）：
+`switch_on_begin,ready,start_fail,switch_off_begin,switch_off,off_fail,net_down,captive,net_up,net_up_begin,offline,core_down,update_start,update_ok,update_fail`
 
-去重：同一事件 25 秒内只记一次；watcher 是**状态变化（边沿）触发**，不是每 20s 轮询都发。
+| 事件 | 触发时机 | 开头 |
+|---|---|---|
+| `switch_on_begin` | **拨杆拨到 ON 的瞬间**，在探测 / 启动之前 | 🟢🔄 |
+| `ready` | 核心启动成功（稳定 14s）；或开机 `sync` 时核心已在运行 | ✅ |
+| `start_fail` | 等满 150s 仍未得到稳定运行的核心 | ❌ |
+| `switch_off_begin` | **拨杆拨到 OFF 的瞬间**，在停守护 / 停核心之前 | 🔴⏻ |
+| `switch_off` | 核心已停止，灯已熄灭，带耗时 | ⏻ |
+| `off_fail` | 等待 90s 后核心仍有残留进程 | ❌ |
+| `net_down` | watcher 连续 3 次（约 60s）外网探测失败，上游链路正常 → 暂停核心 | 📡⚠️ |
+| `offline` | 上游链路断开（无默认路由 / 网关不可达）→ 暂停核心 | 🔌 |
+| `captive` | 检测到强制门户，需要网页认证 | 🔐 |
+| `net_up_begin` | 网络恢复，watcher 开始重新拉起核心 | 🌐✅🔄 |
+| `net_up` | 网络恢复且核心持续运行 / 重新就绪 | 🌐✅ |
+| `update_start` | 每日 04:00 依赖更新开始 | 🔄📦 |
+| `update_ok` | 每日更新成功 | ✅📦 |
+| `update_fail` | 每日更新失败 | ❌📦 |
+| `core_down` | 预留事件，当前版本未接钩子 | 💀 |
 
-消息形如：
+去重：同一事件 25 秒内只记一次；**`switch_on_begin` / `switch_off_begin` / `test`
+豁免防抖**，保证每次拨动都有即时反馈。watcher 是状态变化（边沿）触发，不是每 20s 轮询都发。
+
+消息形如（多行，正文由 `notify.sh` 统一加 🛰 抬头与 🕒 时间尾）：
 
 ```
-GL-MT3600BE · OpenClash
-已就绪 | 核心 pid=1234 | 稳定 14s | 总耗时 21s | 可用内存 58MB
-时间 2026-11-10 14:46:03
+🛰 GL-MT3600BE · OpenClash
+✅ OpenClash 已就绪
+🟢 核心运行中 · pid=32443
+⏱ 耗时 20s · 稳定 14s
+🧠 可用内存 65MB
+📶 http://connect.rom.miui.com/generate_204 -> 204
+🕒 2026-11-10 15:50:43
 ```
 
-延迟补发（超过 90 秒）会追加一行：
-
-```
-（离线期间事件，发生于 2026-11-10 14:20:11，延迟 1552s 送达）
-```
+延迟补发（超过 90 秒）会追加一行 `⏳ 离线期间事件（发生于 …，延迟 …s 送达）`。
 
 ## 11.6 时序：为什么不会拖慢拨杆
 
 ```
 拨杆 on
   └─ openclash.sh（持有固件 flock）
-       ├─ start_clash / led_on ...
-       └─ notify ready  →  [ -x ] + uci 检查
-                              └─ ( exec sh notify.sh emit ... ) &   ← 立即返回
-                                   └─ 写 spool/<ts>-<event>.msg   ← 毫秒级
-                                        └─ ( exec sh notify.sh flush ) &
-                                             └─ curl（独立进程，4s 连接 / 12s 总超时）
+       ├─ notify switch_on_begin  ← 第 1 条，拨杆瞬间（入队后 0s 返回）
+       ├─ probe / start_clash / led_on ...（约 20s）
+       └─ notify ready            ← 第 2 条，核心稳定后
+
+每次 notify：
+  [ -x ] + uci 检查
+    └─ ( exec sh notify.sh emit ... ) &   ← 立即返回
+         └─ 写 spool/<ts>-<event>.msg   ← 毫秒级
+              └─ ( exec sh notify.sh flush ) &
+                   └─ curl（独立进程，4s 连接 / 12s 总超时）
 ```
 
 `notify.sh` 还会在入口关闭 fd 3–20，避免继承调用方的锁句柄（见踩坑记录 #5）。
@@ -218,6 +236,7 @@ GL-MT3600BE · OpenClash
 | 反代返回 403 / 401 但链路通 | `proxy_auth` 是否填对、头名是否匹配（默认 `X-Proxy-Auth`） |
 | 队列一直不减 | `enabled` 是否为 1、token/chat_id 是否填了；`sh /etc/openclash-notify.sh flush` 手动补发 |
 | 消息延迟很久才到 | 正常：断网期间发不出去，恢复后补发，正文会标延迟时间 |
+| 拨杆后很久才收到第一条 | v1.2.0 前只有「完成」事件，需等 20s 启动 / 10s 停止；现在「开始」消息 1s 内就到。若仍只有一条，检查 `notify_events` 是否含 `switch_on_begin` / `switch_off_begin` |
 | 配置页 404 | 确认访问的是 **8080** 端口；`ls -l /www/cgi-bin/oc-notify` 权限应为 755 |
 | 配置页 500 | `sh -n /www/cgi-bin/oc-notify`；看是否缺 `/etc/config/openclash-notify` |
 
@@ -252,3 +271,21 @@ GL-MT3600BE · OpenClash
 
 > 真实 token / 鉴权值 / 反代域名只存在设备的 `/etc/config/openclash-notify`（权限 600），
 > 不写入仓库；`install.sh` 的 `init` 是幂等的，重新部署不会覆盖它。
+
+## 11.11 分阶段通知实测（2026-11-10，v1.2.0 / 拨杆 v0.5.0）
+
+用户反馈「拨了开关很久才有消息」。排查结论：**不是链路慢**——日志里 `入队 → 已发送`
+一直是 1s；慢在事件触发点，`ready` 要等 `start_clash()` 跑完 20s 稳定性校验，
+`switch_off` 要等 `stop_clash()` 轮询 10s。改成拨杆瞬间先发「开始」，完成后再发「结果」。
+
+| 动作 | 下发 | 开始消息送达 | 结果消息送达 | 队列 |
+|---|---|---|---|---|
+| ON | 15:50:23 | **15:50:24（1s）** | 15:50:44（21s，核心稳定） | 0 |
+| OFF | 15:50:48 | **15:50:49（1s）** | 15:51:00（11s，进程消失） | 0 |
+
+- 开始事件豁免 25s 防抖，快速连续拨动也不会吞掉反馈。
+- `install.sh` 会把新事件**合并**进已有 `notify_events` 白名单（保留用户自己的裁剪），
+  否则旧配置里没有这些键，`emit` 会直接过滤掉，表现就是「改了代码却没消息」。
+- `api_resolve` 按用户要求保留；本地 DNS 已恢复，实测不带 `--resolve` 也 `http=200`，
+  该参数现在只是「顺带省 4ms DNS 查询 + 防上游再抽 NXDOMAIN」的可选兜底。
+- 配置页 HTTP 200，`proxy_auth` / `api_resolve` 两个输入框与新事件清单均正常渲染。

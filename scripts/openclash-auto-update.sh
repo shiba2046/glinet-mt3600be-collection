@@ -232,13 +232,19 @@ do_run() {
         return 0
     fi
     log INFO "可用内存 ${_mem}MB，开始更新订阅"
+    notify update_start "🔄📦 每日依赖更新开始
+🧠 可用内存 ${_mem}MB
+⏳ 订阅与 geo 数据刷新中，完成后再报一次"
 
     if update_sub; then
         write_state "ok" "mode=$( [ -n "$(clash_pid)" ] && echo restart || echo norestart )"
-        notify update_ok "每日依赖更新完成 | 订阅与 geo 数据已刷新 | 可用内存 $(mem_avail)MB"
+        notify update_ok "✅📦 每日依赖更新完成
+🗂 订阅与 geo 数据已刷新
+🧠 可用内存 $(mem_avail)MB"
     else
         write_state "failed" "see $LOG_FILE"
-        notify update_fail "每日依赖更新失败 | 详见 $LOG_FILE"
+        notify update_fail "❌📦 每日依赖更新失败
+📄 详见 $LOG_FILE"
     fi
     log INFO "===== 结束 ====="
 }

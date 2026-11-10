@@ -4,21 +4,23 @@
 #
 #  OpenClash 状态事件 -> Telegram Bot 推送（GL.iNet GL-MT3600BE / OpenWrt 21.02）
 #  Repo   : https://github.com/shiba2046/glinet-mt3600be-collection
-#  Version: 1.1.0
+#  Version: 1.2.0
 #
 #  设计要点（为什么不是一个 curl 就完事）：
 #    1. 不阻塞拨杆：拨杆脚本处在固件的 flock 串行区里，一次 HTTPS 超时 12s
 #       会让开关看起来"卡住"。这里 emit 只写一个本地队列文件（毫秒级），
 #       再 fork 独立进程去发；主流程永不等待网络。
-#    2. 离线也能记：断网 / captive portal 时 Telegram 同样发不出去，
+#    2. 分阶段反馈：拨杆瞬间先发一条「🟢 开始」，核心稳定后再发一条
+#       「✅ 结果」。开始类事件豁免 25s 防抖，每次拨动都必有反馈。
+#    3. 离线也能记：断网 / captive portal 时 Telegram 同样发不出去，
 #       消息留在 flash 队列，等网络恢复后按序补发，并标注"延迟送达"。
-#    3. API 地址可配：api_base 默认 https://api.telegram.org，也可以填自建
+#    4. API 地址可配：api_base 默认 https://api.telegram.org，也可以填自建
 #       反代（墙后直连可达的那种）。默认 api_mode=direct，只请求这一个地址，
 #       不做任何自动切换、不走 clash 代理，避免反代流量被二次转发。
 #       反代需要鉴权时用 proxy_auth 加 X-Proxy-Auth 头；上游 DNS 有 NXDOMAIN
-#       负缓存导致域名解析不了时，用 api_resolve 填 IP，走 curl --resolve 绕开。
+#       负缓存时用 api_resolve 填 IP，走 curl --resolve 绕开（留空则用系统 DNS）。
 #       仍保留 proxy / auto 两个可选模式，但默认不用。
-#    4. 不刷屏：同一事件 25 秒内只记一次；watcher 是边沿触发而非每次轮询。
+#    5. 不刷屏：同一事件 25 秒内只记一次；watcher 是边沿触发而非每次轮询。
 #
 #  配置：/etc/config/openclash-notify （UCI）
 #  队列：/etc/openclash-notify/spool/ （flash，重启不丢）
@@ -36,7 +38,7 @@
 #    clear                     清空队列
 # ============================================================================
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 CONF="/etc/config/openclash-notify"
 SPOOL="${OCN_SPOOL:-/etc/openclash-notify/spool}"
 LOG="${OCN_LOG:-/tmp/openclash-notify.log}"
@@ -44,7 +46,7 @@ STATE="${OCN_STATE:-/var/run/oc-notify}"
 LOCK="/var/lock/oc-notify.lock"
 CA="/etc/ssl/certs/ca-certificates.crt"
 API_DEFAULT="https://api.telegram.org"       # 也可用 OCN_API 环境变量覆盖，便于离线自测
-DEFAULT_EVENTS="ready,start_fail,switch_off,net_down,captive,net_up,offline,core_down,update_fail"
+DEFAULT_EVENTS="switch_on_begin,ready,start_fail,switch_off_begin,switch_off,off_fail,net_down,captive,net_up,net_up_begin,offline,core_down,update_start,update_ok,update_fail"
 QUEUE_MAX=50
 DEBOUNCE=25
 
@@ -97,7 +99,7 @@ config notify 'main'
 	option api_resolve ''
 	option api_mode 'direct'
 	option proxy_port '7893'
-	option notify_events 'ready,start_fail,switch_off,net_down,captive,net_up,offline,core_down,update_fail'
+	option notify_events 'switch_on_begin,ready,start_fail,switch_off_begin,switch_off,off_fail,net_down,captive,net_up,net_up_begin,offline,core_down,update_start,update_ok,update_fail'
 	option web_pin ''
 EOF
     chmod 600 "$CONF"
@@ -107,7 +109,7 @@ EOF
 
 # ---------------------------------------------------------------------------
 # 组装消息
-#   spool 文件前 4 行是元数据，第 4 行起是正文
+#   spool 文件前 3 行是元数据，第 4 行起是正文（正文允许多行）
 #     1: epoch  2: 可读时间  3: 事件名  4+: 正文
 # ---------------------------------------------------------------------------
 enqueue() {
@@ -147,12 +149,12 @@ send_one() {
     _delay=$((_now - ${_ts:-_now}))
     if [ "$_delay" -gt 90 ] 2>/dev/null; then
         _txt="$_txt
-（离线期间事件，发生于 $_ht，延迟 ${_delay}s 送达）"
+⏳ 离线期间事件（发生于 $_ht，延迟 ${_delay}s 送达）"
     fi
     _host=$(uci -q get 'system.@system[0].hostname' 2>/dev/null)
-    _text="${_host:-GL-MT3600BE} · OpenClash
+    _text="🛰 ${_host:-GL-MT3600BE} · OpenClash
 $_txt
-时间 $_ht"
+🕒 $_ht"
 
     # api_base 支持自建反代：后面按官方规则拼 /bot<TOKEN>/sendMessage
     _base=${OCN_API:-$(cfg_or api_base "$API_DEFAULT")}
@@ -173,16 +175,18 @@ $_txt
     _auth=$(cfg proxy_auth)
     [ -n "$_auth" ] && _authopt="-H X-Proxy-Auth:$_auth"
 
-    # 上游 DNS 残留 NXDOMAIN 负缓存时，用 --resolve 把主机名直接钉到 IP。
-    # 主机名/端口从 api_base 取，TLS SNI 仍按 URL 主机名发，Cloudflare 可正确路由。
+    # 可选 DNS 兜底：上游残留 NXDOMAIN 负缓存时，用 --resolve 把主机名钉到 IP，
+    # 顺带省掉一次 DNS 查询（约 4ms）。主机名/端口从 api_base 取，
+    # TLS SNI 仍按 URL 主机名发，Cloudflare 这类共享 IP 反代可正确路由。
+    # 留空则完全不加该参数，走系统 DNS。反代换 IP 时记得同步改 api_resolve。
     _resopt=""
     _rip=$(cfg api_resolve)
     if [ -n "$_rip" ]; then
         _hp=$(printf '%s' "$_base" | sed -e 's|^[A-Za-z][A-Za-z0-9+.-]*://||' -e 's|/.*$||')
         _port=$(printf '%s' "$_hp" | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
-        _host=$(printf '%s' "$_hp" | sed 's|:[0-9][0-9]*$||')
+        _rh=$(printf '%s' "$_hp" | sed 's|:[0-9][0-9]*$||')
         [ -n "$_port" ] || _port=443
-        _resopt="--resolve $_host:$_port:$_rip"
+        _resopt="--resolve $_rh:$_port:$_rip"
     fi
 
     for _m in $_modes; do
@@ -265,16 +269,23 @@ do_emit() {
     esac
 
     ensure_dirs
-    _now=$(date +%s)
-    _last=$(cat "$STATE/last.$_ev" 2>/dev/null)
-    if [ -n "$_last" ] && [ $((_now - _last)) -lt "$DEBOUNCE" ] 2>/dev/null; then
-        log INFO "事件 $_ev 在 ${DEBOUNCE}s 内重复，跳过"
-        return 0
-    fi
-    printf '%s' "$_now" > "$STATE/last.$_ev"
+    # 用户主动拨杆 / 测试每次都要有反馈，豁免 25s 防抖；否则快速
+    # ON→OFF→ON 时第二次「开始」会被窗口吞掉，看起来像又"丢消息"。
+    case "$_ev" in
+        switch_on_begin|switch_off_begin|test) ;;
+        *)
+            _now=$(date +%s)
+            _last=$(cat "$STATE/last.$_ev" 2>/dev/null)
+            if [ -n "$_last" ] && [ $((_now - _last)) -lt "$DEBOUNCE" ] 2>/dev/null; then
+                log INFO "事件 $_ev 在 ${DEBOUNCE}s 内重复，跳过"
+                return 0
+            fi
+            printf '%s' "$_now" > "$STATE/last.$_ev"
+            ;;
+    esac
 
     _f=$(enqueue "$_ev" "$*") || return 0
-    log INFO "入队 $_ev -> $(basename "$_f")：$*"
+    log INFO "入队 $_ev -> $(basename "$_f")：$(printf '%s' "$*" | tr '\n' ' ')"
     # 完全脱离调用方：拨杆脚本持有固件锁，绝不能让网络 IO 串行进去
     ( exec sh "$0" flush >/dev/null 2>&1 ) &
     return 0
@@ -285,15 +296,16 @@ do_emit() {
 # ---------------------------------------------------------------------------
 do_test() {
     ensure_dirs
-    _txt="${*:-通知测试：看到这条说明 bot token / chat_id / 网络都正确。}"
+    _txt="${*:-🧪 通知测试
+✅ 看到这条说明 bot token / chat_id / 网络都正确}"
     _f=$(enqueue "test" "$_txt") || return 1
     if send_one "$_f"; then
         rm -f "$_f"
-        echo "测试消息发送成功。API：${OCN_API:-$(cfg_or api_base "$API_DEFAULT")}"
+        echo "✅ 测试消息发送成功。API：${OCN_API:-$(cfg_or api_base "$API_DEFAULT")}"
         return 0
     fi
     rm -f "$_f"
-    echo "发送失败，详见 $LOG"
+    echo "❌ 发送失败，详见 $LOG"
     tail -n 8 "$LOG" 2>/dev/null
     return 1
 }

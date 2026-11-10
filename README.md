@@ -31,9 +31,10 @@
 - **失败自诊断**：启动失败会自己判断是不是被 OOM Killer 杀掉（只认本次启动之后的 `dmesg`），
   并附上 OpenClash 自己的日志尾部。
 - **分层自动更新**：geo/规则交给 mihomo 核心自己更，订阅走自建 cron，核心二进制只手动更。
-- **Telegram 状态推送**：开启成功 / 启动失败 / 关闭 / 外网中断 / 恢复 / 认证页 / 更新失败都会发消息；
+- **Telegram 状态推送**：拨杆瞬间先发一条 🟢/🔴「开始」，核心就绪或关闭后再发 ✅/⏻「结果」，
+  多行 emoji 排版；开启失败 / 外网中断 / 恢复 / 认证页 / 每日更新也都有消息。
   异步队列 + 断网补发，不阻塞拨杆。支持填墙后可达的 API 反代地址、自定义鉴权头
-  `X-Proxy-Auth`，以及本地 DNS 解析不了时的 `--resolve` 兜底。
+  `X-Proxy-Auth`，以及可选的 `--resolve` DNS 兜底（留空即用系统 DNS）。
 - **配置页**：`http://192.168.8.1:8080/cgi-bin/oc-notify`，用 uhttpd 现成的 CGI，无额外常驻服务。
 - **小内存调优**：`tools/setup-zram.sh` 启用 zram 压缩交换、`tools/trim-services.sh` 停用无用常驻服务，
   实测拨杆 ON 可用内存 49 → 62MB；两者都可回滚，详见 [docs/12](docs/12-memory-tuning.md)。
@@ -129,10 +130,11 @@ sh /etc/openclash-notify.sh enable && sh /etc/openclash-notify.sh test
    │
    ├─ probe()  三个 generate_204：204=在线 / 有 HTTP 但非 204=认证页 / 全失败=离线
    ├─ uci set openclash.config.enable=1|0     ← 意图，watcher 与启动流程都看它
-   ├─ start_clash / stop_clash                ← 调 /etc/init.d/openclash
+   ├─ notify *_begin                         ← 第 1 条：拨杆瞬间，1s 内送达
+   ├─ start_clash / stop_clash                ← 调 /etc/init.d/openclash，约 20s / 10s
    ├─ watch_start / watch_stop                ← 20s 轮询的后台守护
-   └─ notify <event>                         ← 写本地队列即返回；独立进程发 Telegram
-        └─ /etc/openclash-notify.sh flush     ← 断网留队列，恢复后按序补发
+   └─ notify ready / switch_off               ← 第 2 条：完成后，带耗时与内存
+        └─ /etc/openclash-notify.sh flush     ← 写队列即返回；断网留队列，恢复后按序补发
 ```
 
 ---

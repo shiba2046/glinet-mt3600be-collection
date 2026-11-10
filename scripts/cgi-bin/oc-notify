@@ -170,7 +170,7 @@ E_BASE=$(cfg api_base);             [ -z "$E_BASE" ] && E_BASE="https://api.tele
 E_RESOLVE=$(cfg api_resolve)
 E_MODE=$(cfg api_mode);             [ -z "$E_MODE" ] && E_MODE=direct
 E_PORT=$(cfg proxy_port);           [ -z "$E_PORT" ] && E_PORT=7893
-E_EVENTS=$(cfg notify_events);      [ -z "$E_EVENTS" ] && E_EVENTS="ready,start_fail,switch_off,net_down,captive,net_up,offline,core_down,update_fail"
+E_EVENTS=$(cfg notify_events);      [ -z "$E_EVENTS" ] && E_EVENTS="switch_on_begin,ready,start_fail,switch_off_begin,switch_off,off_fail,net_down,captive,net_up,net_up_begin,offline,core_down,update_start,update_ok,update_fail"
 QUEUE_N=$(ls -1 /etc/openclash-notify/spool/*.msg 2>/dev/null | wc -l)
 CLASH_PID=$(pidof clash 2>/dev/null)
 [ -z "$CLASH_PID" ] && CLASH_STATE="未运行" || CLASH_STATE="运行中 pid=$CLASH_PID"
@@ -285,7 +285,7 @@ else
 
 <label>要推送的事件</label>
 <textarea name="notify_events">$(html_esc "$E_EVENTS")</textarea>
-<div class="hint">逗号分隔。可用：ready, start_fail, switch_off, net_down, captive, net_up, offline, core_down, update_ok, update_fail</div>
+<div class="hint">逗号分隔。可用：switch_on_begin, ready, start_fail, switch_off_begin, switch_off, off_fail, net_down, captive, net_up, net_up_begin, offline, core_down, update_start, update_ok, update_fail</div>
 EOF
     if [ "$FIRST_RUN" = "1" ]; then
         cat <<EOF
