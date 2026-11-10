@@ -1,5 +1,33 @@
 # 10 · 版本历史与踩坑记录
 
+## 运维配置 · 内存调优（2026-11-10，拨杆脚本未改动）
+
+**实测基线**（固件 4.9.0，`MemTotal 481MB`）：拨杆 OFF 152–158MB；拨杆 ON 仅 **49.0MB
+available**，clash RSS 105MB，代理 204/0.115s。内核另占 `SUnreclaim 56.7MB` +
+`Vmalloc 45MB`（WiFi / hwnat 驱动预分配，动不了）。`min_free_kbytes=16MB`，余量薄，
+订阅更新或连接爆发容易触发 OOM killer。
+
+**已在设备上实施**
+
+- 停用 12 个无用 init 服务（quickstart 9.7MB、4G 短信/蜂窝三件套、ttyd、avahi、
+  gl-cloud / gl-alarm / gl-dpi 等），并收掉 eco 守护拉起的残留。
+  `gl_dpi` 的 init 明明是 disabled，进程仍会被 `/usr/bin/eco` 拉起——必须额外 kill。
+  **保护**：`gl-repeater`（桥接公共 WiFi）、`gl-ngx-session`、拨杆/LED、
+  nginx/uhttpd/dnsmasq 一律不动。OFF 158 → 174.8MB；ON 49 → 61.6MB。
+- 内核支持 `CONFIG_ZRAM=m` / `ZSMALLOC=m` / `CRYPTO_LZO=y`，但 `CONFIG_KSM is not set`、
+  zswap 未编，且 `.ko` 未预装。GL 官方 kmod feed 有版本完全匹配的
+  `kmod-zram 5.4.281-1` + `zram-swap 8`，装后配 96MB / lzo / priority 100 /
+  swappiness 30、`S15zram` 开机自启；`/etc/config/system` 与 `/etc/sysctl.conf`
+  已加入升级保留清单。
+- swappiness 对照：60 时只换出 1.2MB（压缩 0.3MB，4:1），可用内存反降到 57.5MB、
+  延迟 0.065 → 0.110s，故**保持 30**。zram 定位为突发 OOM 保险，常态不介入。
+
+**新增**：`tools/setup-zram.sh`、`tools/trim-services.sh`、`docs/12-memory-tuning.md`。
+
+**未做（待用户确认）**：clash 规则精简。当前 13–14 个 rule-providers / 1.3MB `.mrs` /
+3 个 proxy-providers（其中 Cloudflare Edge Tunnel 订阅 689KB / 约 41 节点）；
+运行配置的 `geodata-loader` 已被 UCI 覆盖为 `memconservative`。清单见 12.5。
+
 ## v1.1.0（通知模块；拨杆脚本仍为 v0.4.0）
 
 **新增：反代鉴权头 + DNS 负缓存兜底**

@@ -35,6 +35,8 @@
   异步队列 + 断网补发，不阻塞拨杆。支持填墙后可达的 API 反代地址、自定义鉴权头
   `X-Proxy-Auth`，以及本地 DNS 解析不了时的 `--resolve` 兜底。
 - **配置页**：`http://192.168.8.1:8080/cgi-bin/oc-notify`，用 uhttpd 现成的 CGI，无额外常驻服务。
+- **小内存调优**：`tools/setup-zram.sh` 启用 zram 压缩交换、`tools/trim-services.sh` 停用无用常驻服务，
+  实测拨杆 ON 可用内存 49 → 62MB；两者都可回滚，详见 [docs/12](docs/12-memory-tuning.md)。
 - **可回滚**：安装时把原有文件备份到 `/root/openclash-switch-backup/<时间戳>/`。
 
 ---
@@ -54,7 +56,9 @@
 │       └── oc-notify          # 配置页 CGI（部署到 /www/cgi-bin/oc-notify）
 ├── tools/
 │   ├── rssh.py                # paramiko 远程执行/上传（没有 sftp 时用得上）
-│   └── rc.local.example       # rc.local 钩子示例
+│   ├── rc.local.example       # rc.local 钩子示例
+│   ├── setup-zram.sh          # 一键启用 zram 压缩交换（可回滚）
+│   └── trim-services.sh       # 停用无用常驻服务（可一键恢复）
 └── docs/                      # 详细文档，见下方索引
 ```
 
@@ -176,6 +180,7 @@ sh /etc/openclash-notify.sh enable && sh /etc/openclash-notify.sh test
 | [docs/09-troubleshooting.md](docs/09-troubleshooting.md) | 症状 → 原因 → 处理 |
 | [docs/10-changelog.md](docs/10-changelog.md) | 版本历史与踩坑记录 |
 | [docs/11-telegram-notify.md](docs/11-telegram-notify.md) | Telegram 状态推送、反代地址、配置页与排查 |
+| [docs/12-memory-tuning.md](docs/12-memory-tuning.md) | 内存实测、zram 压缩交换、停用服务、clash 规则精简清单 |
 
 ## 许可
 
