@@ -1,0 +1,19 @@
+# /etc/rc.local 示例（GL-MT3600BE / 固件 4.9.0）
+#
+# install.sh 不会直接覆盖这个文件，它只在最后一个 exit 0 之前插入两行：
+#     # openclash-switch-hook
+#     ( sleep 25; /etc/gl-switch.d/openclash.sh sync >/dev/null 2>&1 ) &
+#
+# 这个钩子只是兜底：开机时 S99gl_switch_button_check 已经会按拨杆位置调用一次模块。
+# 延迟 25 秒再校正一次，覆盖"网络比 init 起得还晚"和"关机前状态不一致"两种情况。
+# 已有的钩子会被识别（grep 标记），不会重复插入。
+
+. /lib/functions/gl_util.sh
+remount_ubifs          # GL 固件特有：ubifs 重挂载，别删
+
+echo 3 > /proc/sys/vm/drop_caches
+
+# openclash-switch-hook
+( sleep 25; /etc/gl-switch.d/openclash.sh sync >/dev/null 2>&1 ) &
+
+exit 0

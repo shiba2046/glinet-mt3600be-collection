@@ -1,0 +1,19 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# 运行时产物
+*.log
+*.log.1
+__pycache__/
+*.pyc
+
+# 本地会话数据（WorkBuddy 工作区）
+.workbuddy/
+
+# 本地覆盖配置（放自己的 IP/密码，不要提交）
+.env
+deploy.local.sh
